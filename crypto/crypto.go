@@ -11,6 +11,11 @@ import (
 
 var ErrCiphertextLengthIsInvalid = errors.New("ciphertext length is invalid")
 
+// AES128CBCDecrypt decrypts data using AES-CBC mode.
+// Note: Despite the function name, this supports all AES key sizes.
+// The Go standard library's aes.NewCipher automatically selects the AES variant
+// based on the key length: 16 bytes (AES-128), 24 bytes (AES-192), or 32 bytes (AES-256).
+// TODO: Rename to AESCBCDecrypt to avoid confusion about supported key lengths.
 func AES128CBCDecrypt(key, iv, ciphertext []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -137,6 +142,14 @@ func pkcs5UnPadding(src []byte) ([]byte, error) {
 	padding := int(src[length-1])
 	if padding < 1 || padding > aes.BlockSize {
 		return nil, errors.New("pkcs5UnPadding: invalid padding size")
+	}
+	if padding > length {
+		return nil, errors.New("pkcs5UnPadding: invalid padding length")
+	}
+	for _, b := range src[length-padding:] {
+		if int(b) != padding {
+			return nil, errors.New("pkcs5UnPadding: invalid padding content")
+		}
 	}
 	return src[:length-padding], nil
 }
