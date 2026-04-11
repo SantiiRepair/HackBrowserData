@@ -6,113 +6,115 @@ import (
 	"github.com/moond4rk/hackbrowserdata/types"
 )
 
-var (
-	chromiumList = map[string]struct {
-		name        string
-		profilePath string
-		storage     string
-		dataTypes   []types.DataType
-	}{
-		"chrome": {
-			name:        chromeName,
-			profilePath: chromeUserDataPath,
-			dataTypes:   types.DefaultChromiumTypes,
+func platformBrowsers() []types.BrowserConfig {
+	return []types.BrowserConfig{
+		{
+			Key:         "chrome",
+			Name:        chromeName,
+			Kind:        types.Chromium,
+			UserDataDir: homeDir + "/AppData/Local/Google/Chrome/User Data",
 		},
-		"edge": {
-			name:        edgeName,
-			profilePath: edgeProfilePath,
-			dataTypes:   types.DefaultChromiumTypes,
+		{
+			Key:         "edge",
+			Name:        edgeName,
+			Kind:        types.Chromium,
+			UserDataDir: homeDir + "/AppData/Local/Microsoft/Edge/User Data",
 		},
-		"chromium": {
-			name:        chromiumName,
-			profilePath: chromiumUserDataPath,
-			dataTypes:   types.DefaultChromiumTypes,
+		{
+			Key:         "chromium",
+			Name:        chromiumName,
+			Kind:        types.Chromium,
+			UserDataDir: homeDir + "/AppData/Local/Chromium/User Data",
 		},
-		"chrome-beta": {
-			name:        chromeBetaName,
-			profilePath: chromeBetaUserDataPath,
-			dataTypes:   types.DefaultChromiumTypes,
+		{
+			Key:         "chrome-beta",
+			Name:        chromeBetaName,
+			Kind:        types.Chromium,
+			UserDataDir: homeDir + "/AppData/Local/Google/Chrome Beta/User Data",
 		},
-		"opera": {
-			name:        operaName,
-			profilePath: operaProfilePath,
-			dataTypes:   types.DefaultChromiumTypes,
+		{
+			Key:         "opera",
+			Name:        operaName,
+			Kind:        types.ChromiumOpera,
+			UserDataDir: homeDir + "/AppData/Roaming/Opera Software/Opera Stable",
 		},
-		"opera-gx": {
-			name:        operaGXName,
-			profilePath: operaGXProfilePath,
-			dataTypes:   types.DefaultChromiumTypes,
+		{
+			Key:         "opera-gx",
+			Name:        operaGXName,
+			Kind:        types.ChromiumOpera,
+			UserDataDir: homeDir + "/AppData/Roaming/Opera Software/Opera GX Stable",
 		},
-		"vivaldi": {
-			name:        vivaldiName,
-			profilePath: vivaldiProfilePath,
-			dataTypes:   types.DefaultChromiumTypes,
+		{
+			Key:         "vivaldi",
+			Name:        vivaldiName,
+			Kind:        types.Chromium,
+			UserDataDir: homeDir + "/AppData/Local/Vivaldi/User Data",
 		},
-		"coccoc": {
-			name:        coccocName,
-			profilePath: coccocProfilePath,
-			dataTypes:   types.DefaultChromiumTypes,
+		{
+			Key:         "coccoc",
+			Name:        coccocName,
+			Kind:        types.Chromium,
+			UserDataDir: homeDir + "/AppData/Local/CocCoc/Browser/User Data",
 		},
-		"brave": {
-			name:        braveName,
-			profilePath: braveProfilePath,
-			dataTypes:   types.DefaultChromiumTypes,
+		{
+			Key:         "brave",
+			Name:        braveName,
+			Kind:        types.Chromium,
+			UserDataDir: homeDir + "/AppData/Local/BraveSoftware/Brave-Browser/User Data",
 		},
-		"yandex": {
-			name:        yandexName,
-			profilePath: yandexProfilePath,
-			dataTypes:   types.DefaultYandexTypes,
+		{
+			Key:         "yandex",
+			Name:        yandexName,
+			Kind:        types.ChromiumYandex,
+			UserDataDir: homeDir + "/AppData/Local/Yandex/YandexBrowser/User Data",
 		},
-		"360": {
-			name:        speed360Name,
-			profilePath: speed360ProfilePath,
-			dataTypes:   types.DefaultChromiumTypes,
+		{
+			Key:         "360x",
+			Name:        speed360XName,
+			Kind:        types.Chromium,
+			UserDataDir: homeDir + "/AppData/Local/360ChromeX/Chrome/User Data",
 		},
-		"qq": {
-			name:        qqBrowserName,
-			profilePath: qqBrowserProfilePath,
-			dataTypes:   types.DefaultChromiumTypes,
+		{
+			Key:         "360",
+			Name:        speed360Name,
+			Kind:        types.Chromium,
+			UserDataDir: homeDir + "/AppData/Local/360chrome/Chrome/User Data",
 		},
-		"dc": {
-			name:        dcBrowserName,
-			profilePath: dcBrowserProfilePath,
-			dataTypes:   types.DefaultChromiumTypes,
+		{
+			Key:         "qq",
+			Name:        qqName,
+			Kind:        types.Chromium,
+			UserDataDir: homeDir + "/AppData/Local/Tencent/QQBrowser/User Data",
 		},
-		"sogou": {
-			name:        sogouName,
-			profilePath: sogouProfilePath,
-			dataTypes:   types.DefaultChromiumTypes,
+		{
+			Key:         "dc",
+			Name:        dcName,
+			Kind:        types.Chromium,
+			UserDataDir: homeDir + "/AppData/Local/DCBrowser/User Data",
+		},
+		{
+			Key:         "sogou",
+			Name:        sogouName,
+			Kind:        types.Chromium,
+			UserDataDir: homeDir + "/AppData/Local/Sogou/SogouExplorer/User Data",
+		},
+		{
+			Key:         "arc",
+			Name:        arcName,
+			Kind:        types.Chromium,
+			UserDataDir: homeDir + "/AppData/Local/Packages/TheBrowserCompany.Arc_*/LocalCache/Local/Arc/User Data",
+		},
+		{
+			Key:         "duckduckgo",
+			Name:        duckduckgoName,
+			Kind:        types.Chromium,
+			UserDataDir: homeDir + "/AppData/Local/Packages/DuckDuckGo.DesktopBrowser_*/LocalState/EBWebView",
+		},
+		{
+			Key:         "firefox",
+			Name:        firefoxName,
+			Kind:        types.Firefox,
+			UserDataDir: homeDir + "/AppData/Roaming/Mozilla/Firefox/Profiles",
 		},
 	}
-	firefoxList = map[string]struct {
-		name        string
-		storage     string
-		profilePath string
-		dataTypes   []types.DataType
-	}{
-		"firefox": {
-			name:        firefoxName,
-			profilePath: firefoxProfilePath,
-			dataTypes:   types.DefaultFirefoxTypes,
-		},
-	}
-)
-
-var (
-	chromeUserDataPath     = homeDir + "/AppData/Local/Google/Chrome/User Data/Default/"
-	chromeBetaUserDataPath = homeDir + "/AppData/Local/Google/Chrome Beta/User Data/Default/"
-	chromiumUserDataPath   = homeDir + "/AppData/Local/Chromium/User Data/Default/"
-	edgeProfilePath        = homeDir + "/AppData/Local/Microsoft/Edge/User Data/Default/"
-	braveProfilePath       = homeDir + "/AppData/Local/BraveSoftware/Brave-Browser/User Data/Default/"
-	speed360ProfilePath    = homeDir + "/AppData/Local/360chrome/Chrome/User Data/Default/"
-	qqBrowserProfilePath   = homeDir + "/AppData/Local/Tencent/QQBrowser/User Data/Default/"
-	operaProfilePath       = homeDir + "/AppData/Roaming/Opera Software/Opera Stable/"
-	operaGXProfilePath     = homeDir + "/AppData/Roaming/Opera Software/Opera GX Stable/"
-	vivaldiProfilePath     = homeDir + "/AppData/Local/Vivaldi/User Data/Default/"
-	coccocProfilePath      = homeDir + "/AppData/Local/CocCoc/Browser/User Data/Default/"
-	yandexProfilePath      = homeDir + "/AppData/Local/Yandex/YandexBrowser/User Data/Default/"
-	dcBrowserProfilePath   = homeDir + "/AppData/Local/DCBrowser/User Data/Default/"
-	sogouProfilePath       = homeDir + "/AppData/Roaming/SogouExplorer/Webkit/Default/"
-
-	firefoxProfilePath = homeDir + "/AppData/Roaming/Mozilla/Firefox/Profiles/"
-)
+}

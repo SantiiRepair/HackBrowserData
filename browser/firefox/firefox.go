@@ -1,312 +1,298 @@
 package firefox
 
 import (
-	"bytes"
-	"database/sql"
-	"encoding/base64"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
-	"github.com/tidwall/gjson"
-	_ "modernc.org/sqlite" // sqlite3 driver TODO: replace with chooseable driver
-
-	"github.com/moond4rk/hackbrowserdata/browserdata"
-	"github.com/moond4rk/hackbrowserdata/crypto"
+	"github.com/moond4rk/hackbrowserdata/filemanager"
 	"github.com/moond4rk/hackbrowserdata/log"
 	"github.com/moond4rk/hackbrowserdata/types"
 	"github.com/moond4rk/hackbrowserdata/utils/fileutil"
-	"github.com/moond4rk/hackbrowserdata/utils/typeutil"
 )
 
-type Firefox struct {
-	name        string
-	storage     string
-	profilePath string
-	masterKey   []byte
-	items       []types.DataType
-	itemPaths   map[types.DataType]string
+// Browser represents a single Firefox profile ready for extraction.
+type Browser struct {
+	cfg         types.BrowserConfig
+	profileDir  string                          // absolute path to profile directory
+	sources     map[types.Category][]sourcePath // Category → candidate paths (priority order)
+	sourcePaths map[types.Category]resolvedPath // Category → discovered absolute path
 }
 
-var ErrProfilePathNotFound = errors.New("profile path not found")
+// NewBrowsers discovers Firefox profiles under cfg.UserDataDir and returns
+// one Browser per profile. Firefox profile directories have random names
+// (e.g. "97nszz88.default-release"); any subdirectory containing known
+// data files is treated as a valid profile.
+func NewBrowsers(cfg types.BrowserConfig) ([]*Browser, error) {
+	profileDirs := discoverProfiles(cfg.UserDataDir, firefoxSources)
+	if len(profileDirs) == 0 {
+		return nil, nil
+	}
 
-// New returns new Firefox instances.
-func New(profilePath string, items []types.DataType) ([]*Firefox, error) {
-	multiItemPaths := make(map[string]map[types.DataType]string)
-	// ignore walk dir error since it can be produced by a single entry
-	_ = filepath.WalkDir(profilePath, firefoxWalkFunc(items, multiItemPaths))
-
-	firefoxList := make([]*Firefox, 0, len(multiItemPaths))
-	for name, itemPaths := range multiItemPaths {
-		firefoxList = append(firefoxList, &Firefox{
-			name:      fmt.Sprintf("firefox-%s", name),
-			items:     typeutil.Keys(itemPaths),
-			itemPaths: itemPaths,
+	var browsers []*Browser
+	for _, profileDir := range profileDirs {
+		sourcePaths := resolveSourcePaths(firefoxSources, profileDir)
+		if len(sourcePaths) == 0 {
+			continue
+		}
+		browsers = append(browsers, &Browser{
+			cfg:         cfg,
+			profileDir:  profileDir,
+			sources:     firefoxSources,
+			sourcePaths: sourcePaths,
 		})
 	}
-
-	return firefoxList, nil
+	return browsers, nil
 }
 
-func (f *Firefox) copyItemToLocal() error {
-	for i, path := range f.itemPaths {
-		filename := i.TempFilename()
-		if err := fileutil.CopyFile(path, filename); err != nil {
-			return err
-		}
+func (b *Browser) BrowserName() string { return b.cfg.Name }
+func (b *Browser) ProfileDir() string  { return b.profileDir }
+func (b *Browser) ProfileName() string {
+	if b.profileDir == "" {
+		return ""
 	}
-	return nil
+	return filepath.Base(b.profileDir)
 }
 
-func firefoxWalkFunc(items []types.DataType, multiItemPaths map[string]map[types.DataType]string) fs.WalkDirFunc {
-	return func(path string, info fs.DirEntry, err error) error {
-		if err != nil {
-			if os.IsPermission(err) {
-				log.Warnf("skipping walk firefox path %s permission error: %v", path, err)
-				return nil
-			}
-			return err
-		}
-		for _, v := range items {
-			if info.Name() == v.Filename() {
-				parentBaseDir := fileutil.ParentBaseDir(path)
-				if _, exist := multiItemPaths[parentBaseDir]; exist {
-					multiItemPaths[parentBaseDir][v] = path
-				} else {
-					multiItemPaths[parentBaseDir] = map[types.DataType]string{v: path}
-				}
-			}
-		}
+// Extract copies browser files to a temp directory, retrieves the master key,
+// and extracts data for the requested categories.
+func (b *Browser) Extract(categories []types.Category) (*types.BrowserData, error) {
+	session, err := filemanager.NewSession()
+	if err != nil {
+		return nil, err
+	}
+	defer session.Cleanup()
 
+	tempPaths := b.acquireFiles(session, categories)
+
+	masterKey, err := b.getMasterKey(session, tempPaths)
+	if err != nil {
+		log.Debugf("get master key for %s: %v", b.BrowserName()+"/"+b.ProfileName(), err)
+	}
+
+	data := &types.BrowserData{}
+	for _, cat := range categories {
+		path, ok := tempPaths[cat]
+		if !ok {
+			continue
+		}
+		b.extractCategory(data, cat, masterKey, path)
+	}
+	return data, nil
+}
+
+// CountEntries copies browser files to a temp directory and counts entries
+// per category without decryption. Much faster than Extract for display-only
+// use cases like "list --detail".
+func (b *Browser) CountEntries(categories []types.Category) (map[types.Category]int, error) {
+	session, err := filemanager.NewSession()
+	if err != nil {
+		return nil, err
+	}
+	defer session.Cleanup()
+
+	tempPaths := b.acquireFiles(session, categories)
+
+	counts := make(map[types.Category]int)
+	for _, cat := range categories {
+		path, ok := tempPaths[cat]
+		if !ok {
+			continue
+		}
+		counts[cat] = b.countCategory(cat, path)
+	}
+	return counts, nil
+}
+
+// countCategory calls the appropriate count function for a category.
+func (b *Browser) countCategory(cat types.Category, path string) int {
+	var count int
+	var err error
+	switch cat {
+	case types.Password:
+		count, err = countPasswords(path)
+	case types.Cookie:
+		count, err = countCookies(path)
+	case types.History:
+		count, err = countHistories(path)
+	case types.Download:
+		count, err = countDownloads(path)
+	case types.Bookmark:
+		count, err = countBookmarks(path)
+	case types.Extension:
+		count, err = countExtensions(path)
+	case types.LocalStorage:
+		count, err = countLocalStorage(path)
+	case types.CreditCard, types.SessionStorage:
+		// Firefox does not support CreditCard or SessionStorage.
+	}
+	if err != nil {
+		log.Debugf("count %s for %s: %v", cat, b.BrowserName()+"/"+b.ProfileName(), err)
+	}
+	return count
+}
+
+// acquireFiles copies source files to the session temp directory.
+func (b *Browser) acquireFiles(session *filemanager.Session, categories []types.Category) map[types.Category]string {
+	tempPaths := make(map[types.Category]string)
+	for _, cat := range categories {
+		rp, ok := b.sourcePaths[cat]
+		if !ok {
+			continue
+		}
+		dst := filepath.Join(session.TempDir(), cat.String())
+		if err := session.Acquire(rp.absPath, dst, rp.isDir); err != nil {
+			log.Debugf("acquire %s: %v", cat, err)
+			continue
+		}
+		tempPaths[cat] = dst
+	}
+	return tempPaths
+}
+
+// getMasterKey retrieves the Firefox master encryption key from key4.db.
+// The key is derived via NSS ASN1 PBE decryption (platform-agnostic).
+// If logins.json was already acquired by acquireFiles, the derived key
+// is validated by attempting to decrypt an actual login entry.
+func (b *Browser) getMasterKey(session *filemanager.Session, tempPaths map[types.Category]string) ([]byte, error) {
+	key4Src := filepath.Join(b.profileDir, "key4.db")
+	if !fileutil.FileExists(key4Src) {
+		return nil, nil
+	}
+	key4Dst := filepath.Join(session.TempDir(), "key4.db")
+	if err := session.Acquire(key4Src, key4Dst, false); err != nil {
+		return nil, fmt.Errorf("acquire key4.db: %w", err)
+	}
+
+	// logins.json is already acquired by acquireFiles as the Password source;
+	// reuse it for master key validation if available.
+	loginsPath := tempPaths[types.Password]
+	return retrieveMasterKey(key4Dst, loginsPath)
+}
+
+// retrieveMasterKey reads key4.db and derives the master key using NSS.
+// If loginsPath is non-empty, the derived key is validated against actual
+// login data to ensure the correct candidate is selected.
+func retrieveMasterKey(key4Path, loginsPath string) ([]byte, error) {
+	k4, err := readKey4DB(key4Path)
+	if err != nil {
+		return nil, err
+	}
+
+	keys, err := k4.deriveKeys()
+	if err != nil {
+		return nil, err
+	}
+	if len(keys) == 0 {
+		return nil, errors.New("no valid master key candidates in key4.db")
+	}
+
+	// No logins to validate against — return the first derived key.
+	if loginsPath == "" {
+		return keys[0], nil
+	}
+
+	// Validate against actual login data.
+	if key := validateKeyWithLogins(keys, loginsPath); key != nil {
+		return key, nil
+	}
+
+	return nil, fmt.Errorf("derived %d key(s) but none could decrypt logins", len(keys))
+}
+
+// extractCategory calls the appropriate extract function for a category.
+func (b *Browser) extractCategory(data *types.BrowserData, cat types.Category, masterKey []byte, path string) {
+	var err error
+	switch cat {
+	case types.Password:
+		data.Passwords, err = extractPasswords(masterKey, path)
+	case types.Cookie:
+		data.Cookies, err = extractCookies(path)
+	case types.History:
+		data.Histories, err = extractHistories(path)
+	case types.Download:
+		data.Downloads, err = extractDownloads(path)
+	case types.Bookmark:
+		data.Bookmarks, err = extractBookmarks(path)
+	case types.Extension:
+		data.Extensions, err = extractExtensions(path)
+	case types.LocalStorage:
+		data.LocalStorage, err = extractLocalStorage(path)
+	case types.CreditCard, types.SessionStorage:
+		// Firefox does not support CreditCard or SessionStorage extraction.
+	}
+	if err != nil {
+		log.Debugf("extract %s for %s: %v", cat, b.BrowserName()+"/"+b.ProfileName(), err)
+	}
+}
+
+// resolvedPath holds the absolute path and type for a discovered source.
+type resolvedPath struct {
+	absPath string
+	isDir   bool
+}
+
+// discoverProfiles lists subdirectories of userDataDir that contain at least
+// one known data source. Each such directory is a Firefox profile.
+func discoverProfiles(userDataDir string, sources map[types.Category][]sourcePath) []string {
+	entries, err := os.ReadDir(userDataDir)
+	if err != nil {
 		return nil
 	}
-}
 
-// GetMasterKey returns master key of Firefox. from key4.db
-func (f *Firefox) GetMasterKey() ([]byte, error) {
-	tempFilename := types.FirefoxKey4.TempFilename()
-
-	// Open and defer close of the database.
-	keyDB, err := sql.Open("sqlite", tempFilename)
-	if err != nil {
-		return nil, fmt.Errorf("open key4.db error: %w", err)
-	}
-	defer os.Remove(tempFilename)
-	defer keyDB.Close()
-
-	metaItem1, metaItem2, err := queryMetaData(keyDB)
-	if err != nil {
-		return nil, fmt.Errorf("query metadata error: %w", err)
-	}
-
-	candidates, err := queryNssPrivateCandidates(keyDB)
-	if err != nil {
-		return nil, fmt.Errorf("query NSS private error: %w", err)
-	}
-	loginCipherPairs, _ := getFirefoxLoginCipherPairs()
-
-	var (
-		fallbackKey []byte
-		lastErr     error
-	)
-	for _, c := range candidates {
-		masterKey, err := processMasterKey(metaItem1, metaItem2, c.a11, c.a102)
-		if err != nil {
-			lastErr = err
+	var profiles []string
+	for _, e := range entries {
+		if !e.IsDir() {
 			continue
 		}
-		if fallbackKey == nil {
-			fallbackKey = masterKey
-		}
-
-		if len(loginCipherPairs) == 0 {
-			return masterKey, nil
-		}
-		if canDecryptAnyLoginCipherPair(masterKey, loginCipherPairs) {
-			return masterKey, nil
+		dir := filepath.Join(userDataDir, e.Name())
+		if hasAnySource(sources, dir) {
+			profiles = append(profiles, dir)
 		}
 	}
-
-	if fallbackKey != nil {
-		return fallbackKey, nil
-	}
-	if lastErr != nil {
-		return nil, lastErr
-	}
-	return nil, errors.New("no valid firefox master key found in nssPrivate")
+	return profiles
 }
 
-func queryMetaData(db *sql.DB) ([]byte, []byte, error) {
-	const query = `SELECT item1, item2 FROM metaData WHERE id = 'password'`
-	var metaItem1, metaItem2 []byte
-	if err := db.QueryRow(query).Scan(&metaItem1, &metaItem2); err != nil {
-		return nil, nil, err
-	}
-	return metaItem1, metaItem2, nil
-}
-
-type nssPrivateCandidate struct {
-	a11  []byte
-	a102 []byte
-}
-
-func queryNssPrivateCandidates(db *sql.DB) ([]nssPrivateCandidate, error) {
-	const query = `SELECT a11, a102 FROM nssPrivate`
-	rows, err := db.Query(query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var candidates []nssPrivateCandidate
-	for rows.Next() {
-		var c nssPrivateCandidate
-		if err := rows.Scan(&c.a11, &c.a102); err != nil {
-			return nil, err
-		}
-		candidates = append(candidates, c)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if len(candidates) == 0 {
-		return nil, errors.New("nssPrivate is empty")
-	}
-	return candidates, nil
-}
-
-func queryNssPrivate(db *sql.DB) ([]byte, []byte, error) {
-	// Keep this helper for backward compatibility in tests.
-	candidates, err := queryNssPrivateCandidates(db)
-	if err != nil {
-		return nil, nil, err
-	}
-	return candidates[0].a11, candidates[0].a102, nil
-}
-
-type loginCipherPair struct {
-	username []byte
-	password []byte
-}
-
-func getFirefoxLoginCipherPairs() ([]loginCipherPair, error) {
-	raw, err := os.ReadFile(types.FirefoxPassword.TempFilename())
-	if err != nil {
-		return nil, err
-	}
-	arr := gjson.GetBytes(raw, "logins").Array()
-	pairs := make([]loginCipherPair, 0, len(arr))
-	for _, v := range arr {
-		uEnc := v.Get("encryptedUsername").String()
-		pEnc := v.Get("encryptedPassword").String()
-		if uEnc == "" || pEnc == "" {
-			continue
-		}
-		uRaw, err := base64.StdEncoding.DecodeString(uEnc)
-		if err != nil {
-			continue
-		}
-		pRaw, err := base64.StdEncoding.DecodeString(pEnc)
-		if err != nil {
-			continue
-		}
-		pairs = append(pairs, loginCipherPair{username: uRaw, password: pRaw})
-		if len(pairs) >= 5 {
-			break
-		}
-	}
-	return pairs, nil
-}
-
-func canDecryptAnyLoginCipherPair(masterKey []byte, pairs []loginCipherPair) bool {
-	for _, pair := range pairs {
-		uPBE, err := crypto.NewASN1PBE(pair.username)
-		if err != nil {
-			continue
-		}
-		if _, err := uPBE.Decrypt(masterKey); err != nil {
-			continue
-		}
-
-		pPBE, err := crypto.NewASN1PBE(pair.password)
-		if err != nil {
-			continue
-		}
-		if _, err := pPBE.Decrypt(masterKey); err == nil {
-			return true
+// hasAnySource checks if dir contains at least one source file or directory.
+func hasAnySource(sources map[types.Category][]sourcePath, dir string) bool {
+	for _, candidates := range sources {
+		for _, sp := range candidates {
+			abs := filepath.Join(dir, sp.rel)
+			if _, err := os.Stat(abs); err == nil {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-// processMasterKey process master key of Firefox.
-// Process the metaBytes and nssA11 with the corresponding cryptographic operations.
-func processMasterKey(metaItem1, metaItem2, nssA11, nssA102 []byte) ([]byte, error) {
-	metaPBE, err := crypto.NewASN1PBE(metaItem2)
-	if err != nil {
-		return nil, fmt.Errorf("error creating ASN1PBE from metaItem2: %w", err)
+// resolveSourcePaths checks which sources actually exist in profileDir.
+// Candidates are tried in priority order; the first existing path wins.
+func resolveSourcePaths(sources map[types.Category][]sourcePath, profileDir string) map[types.Category]resolvedPath {
+	resolved := make(map[types.Category]resolvedPath)
+	for cat, candidates := range sources {
+		for _, sp := range candidates {
+			abs := filepath.Join(profileDir, sp.rel)
+			info, err := os.Stat(abs)
+			if err != nil {
+				continue
+			}
+			if sp.isDir == info.IsDir() {
+				resolved[cat] = resolvedPath{abs, sp.isDir}
+				break
+			}
+		}
 	}
-
-	flag, err := metaPBE.Decrypt(metaItem1)
-	if err != nil {
-		return nil, fmt.Errorf("error decrypting master key: %w", err)
-	}
-	const passwordCheck = "password-check"
-
-	if !bytes.Contains(flag, []byte(passwordCheck)) {
-		return nil, errors.New("flag verification failed: password-check not found")
-	}
-
-	keyLin := []byte{248, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
-	if !bytes.Equal(nssA102, keyLin) {
-		return nil, errors.New("master key verification failed: nssA102 not equal to expected value")
-	}
-
-	nssA11PBE, err := crypto.NewASN1PBE(nssA11)
-	if err != nil {
-		return nil, fmt.Errorf("error creating ASN1PBE from nssA11: %w", err)
-	}
-
-	finallyKey, err := nssA11PBE.Decrypt(metaItem1)
-	if err != nil {
-		return nil, fmt.Errorf("error decrypting final key: %w", err)
-	}
-	if len(finallyKey) < 24 {
-		return nil, errors.New("length of final key is less than 24 bytes")
-	}
-	// Historically, the derived PBE key was truncated to 24 bytes for 3DES usage.
-	// Starting from Firefox 144+, NSS switches to AES-256-CBC without changing
-	// the underlying key derivation logic. The full derived key must be preserved
-	// to support modern cipher suites.
-	return finallyKey, nil
+	return resolved
 }
 
-func (f *Firefox) Name() string {
-	return f.name
-}
-
-func (f *Firefox) BrowsingData(isFullExport bool) (*browserdata.BrowserData, error) {
-	dataTypes := f.items
-	if !isFullExport {
-		dataTypes = types.FilterSensitiveItems(f.items)
+// timestamp converts a Unix epoch timestamp (seconds) to a time.Time.
+func timestamp(stamp int64) time.Time {
+	s := time.Unix(stamp, 0)
+	if s.Local().Year() > 9999 {
+		return time.Date(9999, 12, 13, 23, 59, 59, 0, time.Local)
 	}
-
-	data := browserdata.New(dataTypes)
-
-	if err := f.copyItemToLocal(); err != nil {
-		return nil, err
-	}
-
-	masterKey, err := f.GetMasterKey()
-	if err != nil {
-		return nil, err
-	}
-
-	f.masterKey = masterKey
-	if err := data.Recovery(f.masterKey); err != nil {
-		return nil, err
-	}
-	return data, nil
+	return s
 }
