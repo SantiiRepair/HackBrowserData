@@ -6,7 +6,7 @@ import (
 	"database/sql"
 	"sort"
 
-	"github.com/moond4rk/hackbrowserdata/log"
+	"github.com/moond4rk/hackbrowserdata/crypto/keyretriever"
 	"github.com/moond4rk/hackbrowserdata/types"
 	"github.com/moond4rk/hackbrowserdata/utils/sqliteutil"
 )
@@ -18,9 +18,7 @@ const (
 	countCookieQuery = `SELECT COUNT(*) FROM cookies`
 )
 
-func extractCookies(masterKey []byte, path string) ([]types.CookieEntry, error) {
-	var decryptFails int
-	var lastErr error
+func extractCookies(keys keyretriever.MasterKeys, path string) ([]types.CookieEntry, error) {
 	cookies, err := sqliteutil.QueryRows(path, false, defaultCookieQuery,
 		func(rows *sql.Rows) (types.CookieEntry, error) {
 			var (
@@ -36,11 +34,7 @@ func extractCookies(masterKey []byte, path string) ([]types.CookieEntry, error) 
 				return types.CookieEntry{}, err
 			}
 
-			value, err := decryptValue(masterKey, encryptedValue)
-			if err != nil {
-				decryptFails++
-				lastErr = err
-			}
+			value, _ := decryptValue(keys, encryptedValue)
 			value = stripCookieHash(value, host)
 			return types.CookieEntry{
 				Name:         name,
@@ -58,9 +52,6 @@ func extractCookies(masterKey []byte, path string) ([]types.CookieEntry, error) 
 	if err != nil {
 		return nil, err
 	}
-	if decryptFails > 0 {
-		log.Debugf("decrypt cookies: %d failed: %v", decryptFails, lastErr)
-	}
 
 	sort.Slice(cookies, func(i, j int) bool {
 		return cookies[i].CreatedAt.After(cookies[j].CreatedAt)
@@ -72,11 +63,10 @@ func countCookies(path string) (int, error) {
 	return sqliteutil.CountRows(path, false, countCookieQuery)
 }
 
-// stripCookieHash removes the SHA256(host_key) prefix from a decrypted cookie value.
-// Chrome 130+ (Cookie DB schema version 24) prepends SHA256(domain) to the cookie
-// value before encryption to prevent cross-domain cookie replay attacks.
-// If the first 32 bytes don't match SHA256(hostKey), the value is returned unchanged,
-// which handles both older Chrome versions and tampered data.
+// stripCookieHash removes the SHA256(host_key) prefix from a decrypted cookie value. Chrome 130+
+// (Cookie DB schema version 24) prepends SHA256(domain) to the cookie value before encryption to
+// prevent cross-domain cookie replay attacks. If the first 32 bytes don't match SHA256(hostKey), the
+// value is returned unchanged, which handles both older Chrome versions and tampered data.
 func stripCookieHash(value []byte, hostKey string) []byte {
 	if len(value) < sha256.Size {
 		return value

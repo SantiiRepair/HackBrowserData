@@ -1,9 +1,9 @@
 package chromium
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/moond4rk/hackbrowserdata/crypto/keyretriever"
@@ -17,14 +17,14 @@ import (
 type Browser struct {
 	cfg         types.BrowserConfig
 	profileDir  string                               // absolute path to profile directory
-	retriever   keyretriever.KeyRetriever            // set via SetRetriever after construction
+	retrievers  keyretriever.Retrievers              // per-tier key sources (V10 / V11 / V20; unused tiers nil)
 	sources     map[types.Category][]sourcePath      // Category → candidate paths (priority order)
 	extractors  map[types.Category]categoryExtractor // Category → custom extract function override
 	sourcePaths map[types.Category]resolvedPath      // Category → discovered absolute path
 }
 
 // NewBrowsers discovers Chromium profiles under cfg.UserDataDir and returns
-// one Browser per profile. Call SetRetriever on each returned browser before
+// one Browser per profile. Call SetKeyRetrievers on each returned browser before
 // Extract to enable decryption of sensitive data (passwords, cookies, etc.).
 func NewBrowsers(cfg types.BrowserConfig) ([]*Browser, error) {
 	sources := sourcesForKind(cfg.Kind)
@@ -52,11 +52,9 @@ func NewBrowsers(cfg types.BrowserConfig) ([]*Browser, error) {
 	return browsers, nil
 }
 
-// SetRetriever sets the key retriever used by Extract to obtain the
-// master encryption key. Must be called before Extract if encrypted
-// data (passwords, cookies, credit cards) needs to be decrypted.
-func (b *Browser) SetRetriever(r keyretriever.KeyRetriever) {
-	b.retriever = r
+// SetKeyRetrievers wires the per-tier master-key retrievers (V10/V11/V20) used by Extract; unused tiers stay nil.
+func (b *Browser) SetKeyRetrievers(r keyretriever.Retrievers) {
+	b.retrievers = r
 }
 
 func (b *Browser) BrowserName() string { return b.cfg.Name }
@@ -79,10 +77,7 @@ func (b *Browser) Extract(categories []types.Category) (*types.BrowserData, erro
 
 	tempPaths := b.acquireFiles(session, categories)
 
-	masterKey, err := b.getMasterKey(session)
-	if err != nil {
-		log.Debugf("get master key for %s: %v", b.BrowserName()+"/"+b.ProfileName(), err)
-	}
+	keys := b.getMasterKeys(session)
 
 	data := &types.BrowserData{}
 	for _, cat := range categories {
@@ -90,7 +85,7 @@ func (b *Browser) Extract(categories []types.Category) (*types.BrowserData, erro
 		if !ok {
 			continue
 		}
-		b.extractCategory(data, cat, masterKey, path)
+		b.extractCategory(data, cat, keys, path)
 	}
 	return data, nil
 }
@@ -134,7 +129,11 @@ func (b *Browser) countCategory(cat types.Category, path string) int {
 	case types.Bookmark:
 		count, err = countBookmarks(path)
 	case types.CreditCard:
-		count, err = countCreditCards(path)
+		if b.cfg.Kind == types.ChromiumYandex {
+			count, err = countYandexCreditCards(path)
+		} else {
+			count, err = countCreditCards(path)
+		}
 	case types.Extension:
 		if b.cfg.Kind == types.ChromiumOpera {
 			count, err = countOperaExtensions(path)
@@ -170,43 +169,50 @@ func (b *Browser) acquireFiles(session *filemanager.Session, categories []types.
 	return tempPaths
 }
 
-// getMasterKey retrieves the Chromium master encryption key.
-//
-// On Windows, the key is read from the Local State file and decrypted via DPAPI.
-// On macOS, the key is derived from Keychain (Local State is not needed).
-// On Linux, the key is derived from D-Bus Secret Service or a fallback password.
-//
-// The retriever is always called regardless of whether Local State exists,
-// because macOS/Linux retrievers don't need it.
-func (b *Browser) getMasterKey(session *filemanager.Session) ([]byte, error) {
-	if b.retriever == nil {
-		return nil, fmt.Errorf("key retriever not set for %s", b.cfg.Name)
-	}
+// warnedMasterKeyFailure dedupes "master key retrieval" WARN per installation (BrowserName + UserDataDir);
+// profiles share one Safe Storage entry, but glob-expanded configs may yield multiple installations of the same browser.
+var warnedMasterKeyFailure sync.Map
 
-	// Try to locate and copy Local State (needed on Windows, ignored on macOS/Linux).
-	// Multi-profile layout: Local State is in the parent of profileDir.
-	// Flat layout (Opera): Local State is alongside data files in profileDir.
+// getMasterKeys retrieves master keys for all configured cipher tiers.
+func (b *Browser) getMasterKeys(session *filemanager.Session) keyretriever.MasterKeys {
+	label := b.BrowserName() + "/" + b.ProfileName()
+
+	// Locate and copy Local State (needed on Windows, ignored on macOS/Linux). Multi-profile
+	// layout: Local State is in the parent of profileDir. Flat layout (Opera): Local State is
+	// alongside data files in profileDir.
 	var localStateDst string
 	for _, dir := range []string{filepath.Dir(b.profileDir), b.profileDir} {
 		candidate := filepath.Join(dir, "Local State")
-		if fileutil.FileExists(candidate) {
-			localStateDst = filepath.Join(session.TempDir(), "Local State")
-			if err := session.Acquire(candidate, localStateDst, false); err != nil {
-				return nil, err
-			}
+		if !fileutil.FileExists(candidate) {
+			continue
+		}
+		dst := filepath.Join(session.TempDir(), "Local State")
+		if err := session.Acquire(candidate, dst, false); err != nil {
+			log.Debugf("acquire Local State for %s: %v", label, err)
 			break
 		}
+		localStateDst = dst
+		break
 	}
 
-	return b.retriever.RetrieveKey(b.cfg.Storage, localStateDst)
+	keys, err := keyretriever.NewMasterKeys(b.retrievers, b.cfg.Storage, localStateDst)
+	if err != nil {
+		installKey := b.BrowserName() + "|" + b.cfg.UserDataDir
+		if _, already := warnedMasterKeyFailure.LoadOrStore(installKey, struct{}{}); !already {
+			log.Warnf("%s: master key retrieval: %v", b.BrowserName(), err)
+		} else {
+			log.Debugf("%s: master key retrieval: %v", label, err)
+		}
+	}
+	return keys
 }
 
 // extractCategory calls the appropriate extract function for a category.
 // If a custom extractor is registered for this category (via extractorsForKind),
 // it is used instead of the default switch logic.
-func (b *Browser) extractCategory(data *types.BrowserData, cat types.Category, masterKey []byte, path string) {
+func (b *Browser) extractCategory(data *types.BrowserData, cat types.Category, keys keyretriever.MasterKeys, path string) {
 	if ext, ok := b.extractors[cat]; ok {
-		if err := ext.extract(masterKey, path, data); err != nil {
+		if err := ext.extract(keys, path, data); err != nil {
 			log.Debugf("extract %s for %s: %v", cat, b.BrowserName()+"/"+b.ProfileName(), err)
 		}
 		return
@@ -215,9 +221,9 @@ func (b *Browser) extractCategory(data *types.BrowserData, cat types.Category, m
 	var err error
 	switch cat {
 	case types.Password:
-		data.Passwords, err = extractPasswords(masterKey, path)
+		data.Passwords, err = extractPasswords(keys, path)
 	case types.Cookie:
-		data.Cookies, err = extractCookies(masterKey, path)
+		data.Cookies, err = extractCookies(keys, path)
 	case types.History:
 		data.Histories, err = extractHistories(path)
 	case types.Download:
@@ -225,7 +231,7 @@ func (b *Browser) extractCategory(data *types.BrowserData, cat types.Category, m
 	case types.Bookmark:
 		data.Bookmarks, err = extractBookmarks(path)
 	case types.CreditCard:
-		data.CreditCards, err = extractCreditCards(masterKey, path)
+		data.CreditCards, err = extractCreditCards(keys, path)
 	case types.Extension:
 		data.Extensions, err = extractExtensions(path)
 	case types.LocalStorage:
@@ -337,17 +343,19 @@ func isSkippedDir(name string) bool {
 	return false
 }
 
-// timeEpoch converts a WebKit/Chromium epoch timestamp (microseconds since
-// 1601-01-01) to a time.Time.
+// Offset from the Chromium epoch (1601-01-01 UTC) to the Unix epoch,
+// matching base::Time::kTimeTToMicrosecondsOffset in Chromium.
+const chromiumEpochOffsetMicros int64 = 11644473600000000
+
+// timeEpoch converts a Chromium base::Time (μs since 1601 UTC) to UTC.
+// Returns zero for non-positive input or out-of-JSON-range values.
 func timeEpoch(epoch int64) time.Time {
-	maxTime := int64(99633311740000000)
-	if epoch > maxTime {
-		return time.Date(2049, 1, 1, 1, 1, 1, 1, time.Local)
+	if epoch <= 0 {
+		return time.Time{}
 	}
-	t := time.Date(1601, 1, 1, 0, 0, 0, 0, time.Local)
-	d := time.Duration(epoch)
-	for i := 0; i < 1000; i++ {
-		t = t.Add(d)
+	t := time.UnixMicro(epoch - chromiumEpochOffsetMicros).UTC()
+	if t.Year() < 1 || t.Year() > 9999 {
+		return time.Time{}
 	}
 	return t
 }

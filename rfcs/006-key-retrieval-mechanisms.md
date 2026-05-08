@@ -22,14 +22,14 @@ For Chromium encryption details (cipher versions, AES-CBC/GCM), see [RFC-003](00
 
 The interface takes two parameters:
 
-- **`storage`** — keychain/keyring label identifying the browser's secret (e.g. `"Chrome"` on macOS, `"Chrome Safe Storage"` on Linux). Unused on Windows.
-- **`localStatePath`** — path to `Local State` JSON file. Only used on Windows.
+- **`storage`** — platform-dependent identifier. On macOS it's the Keychain account label (e.g. `"Chrome"`); on Linux it's the D-Bus collection label (e.g. `"Chrome Safe Storage"`); on Windows it's the browser key used by `ABERetriever` to locate the elevation-service COM interface (e.g. `"chrome"`, `"edge"`). Ignored by `DPAPIRetriever`.
+- **`localStatePath`** — path to `Local State` JSON file. Only used on Windows (DPAPI + ABE both read it).
 
 The return value is the **ready-to-use decryption key** — either the raw AES key (Windows) or the PBKDF2-derived key (macOS/Linux).
 
 `ChainRetriever` wraps multiple retrievers and tries them in order. The first successful result wins. If all fail, errors from every retriever are combined into a single error.
 
-**Caching**: the retriever is created once per browser and shared across all profiles. macOS retrievers use `sync.Once` internally, so multi-profile browsers only trigger one keychain prompt or memory dump.
+**Caching**: the retriever chain is created once per process inside `newPlatformInjector` (see `browser/browser_{darwin,linux,windows}.go`) and shared across every Chromium browser and every profile. macOS retrievers additionally use `sync.Once` internally, so multi-profile browsers only trigger one keychain prompt or memory dump.
 
 ## 3. macOS Key Retrieval
 
@@ -69,21 +69,13 @@ All macOS strategies produce a raw password string from the keychain. This is de
 
 ### 3.4 Storage Labels
 
-| Browser | Keychain Account |
-|---------|-----------------|
-| Chrome / Chrome Beta | `"Chrome"` |
-| Edge | `"Microsoft Edge"` |
-| Chromium | `"Chromium"` |
-| Opera / OperaGX | `"Opera"` |
-| Vivaldi | `"Vivaldi"` |
-| Brave | `"Brave"` |
-| Yandex | `"Yandex"` |
-| Arc | `"Arc"` |
-| CocCoc | `"CocCoc"` |
+Each browser identifies its Keychain entry with a short account string — typically the browser's base name (`"Chrome"`, `"Brave"`, `"Arc"`). Edge uses `"Microsoft Edge"`. Related variants share labels rather than defining their own: Chrome Beta aliases onto `"Chrome"`, Opera GX aliases onto `"Opera"`.
+
+The authoritative mapping lives in the `Storage` field of each entry in `platformBrowsers()` (`browser/browser_darwin.go`).
 
 ## 4. Windows Key Retrieval
 
-Chromium on Windows stores the master key in `Local State` JSON, encrypted with DPAPI.
+Chromium on Windows stores **two** master keys in `Local State` JSON: a legacy v10 key (`os_crypt.encrypted_key`, DPAPI-wrapped) and, since Chrome 127, an App-Bound Encryption v20 key (`os_crypt.app_bound_encrypted_key`, IElevator-wrapped). Both tiers can coexist on a single profile — Chrome 127+ encrypts *new* cookies with v20 but leaves pre-existing passwords and old cookies on v10 — so the retriever layer fetches both keys independently rather than via a ChainRetriever (see §4.4 and issue #578).
 
 ### 4.1 DPAPI Background
 
@@ -114,24 +106,43 @@ The implementation loads `Crypt32.dll` at runtime via `syscall.NewLazyDLL` and c
 
 Unlike macOS/Linux, DPAPI gives the **final AES-256 key directly**. No intermediate password, no derivation step. The key is used as-is for AES-256-GCM decryption (see [RFC-003](003-chromium-encryption.md)).
 
-### 4.4 Single Retriever
+### 4.4 Dual-Tier Retrievers (V10 + V20)
 
-Windows uses only `DPAPIRetriever` — no chain needed. Both `storage` and `keychainPassword` parameters are ignored.
+Windows populates two slots of the `keyretriever.Retrievers` struct — V10 (legacy DPAPI) and V20 (Chrome 127+ App-Bound Encryption) — which run independently rather than as a first-success chain. V11 stays nil on Windows (Chromium does not emit v11 prefix there).
+
+| Slot | Retriever | Source field | Mechanism |
+|------|-----------|--------------|-----------|
+| V10 | `DPAPIRetriever` | `os_crypt.encrypted_key` | `CryptUnprotectData` (Crypt32.dll) |
+| V20 | `ABERetriever` | `os_crypt.app_bound_encrypted_key` | IElevator via reflective injection (see [RFC-010](010-chrome-abe-integration.md)) |
+
+`browser/browser_windows.go::newPlatformInjector` calls `keyretriever.DefaultRetrievers()` and wires the resulting struct through `Browser.SetKeyRetrievers(r)`. At extract time `keyretriever.NewMasterKeys` runs each slot independently — a failure on one tier does not prevent the other from succeeding, because mixed-tier Chrome profiles (upgraded from pre-127) need partial success to be useful.
+
+**Why not a ChainRetriever?** `ChainRetriever` has first-success semantics: once ABE returns a key, DPAPI is never called. That semantics is wrong for orthogonal tiers — it was the root cause of issue #578, where upgraded profiles' v10-encrypted passwords silently failed because only the v20 key was retrieved. `NewMasterKeys` evaluates each tier independently and returns an `errors.Join` of per-tier failures; log severity is a caller-side decision. `browser/chromium::getMasterKeys` currently logs all tier errors uniformly at `Warnf` — the distinction between "partial" and "total" failure was judged low-value for a short-lived CLI where all warn lines are visible in the default output.
+
+**Non-ABE Chromium forks** (Opera, Vivaldi, Yandex, 360, QQ, Sogou) have `Storage: ""` in `platformBrowsers()`. `ABERetriever` returns `(nil, nil)` for empty storage, which `NewMasterKeys` treats silently as "not applicable" — so attempting ABE on these forks is a no-op, not a failure. Their V10 DPAPI key continues to work unchanged.
 
 ## 5. Linux Key Retrieval
 
-### 5.1 Retrieval Strategies
+### 5.1 Dual-Tier Retrievers (V10 + V11)
 
-**DBusRetriever** — queries the D-Bus Secret Service API (provided by `gnome-keyring-daemon` or `kwalletd`). Iterates all collections and items, looking for a label matching the browser's storage name.
+Linux populates two slots of the `keyretriever.Retrievers` struct — one per cipher prefix that Chromium emits on this platform:
 
-**FallbackRetriever** — when D-Bus is unavailable (headless servers, Docker, CI), uses the hardcoded password `"peanuts"`. This matches Chromium's own fallback behavior.
+| Slot | Prefix | Retriever | Mechanism | Chromium name |
+|------|--------|-----------|-----------|---------------|
+| V10 | `v10` | `PosixRetriever` | PBKDF2(`"peanuts"`) | kV10Key (matches upstream `PosixKeyProvider`) |
+| V11 | `v11` | `DBusRetriever` | PBKDF2(D-Bus Secret Service password) | kV11Key (matches upstream `FreedesktopSecretKeyProvider`) |
 
-### 5.2 Chain Order
+V20 stays nil on Linux (App-Bound Encryption is Windows-only). v12 (Chromium's `SecretPortalKeyProvider`, Flatpak/xdg-desktop-portal) is a separate tier not yet implemented — see the `CipherV12` case in `decryptValue`.
 
-| Priority | Strategy | Requires | Interactive? |
-|----------|----------|----------|:------------:|
-| 1 | D-Bus Secret Service | D-Bus session + keyring | No |
-| 2 | Fallback (`"peanuts"`) | Nothing | No |
+**DBusRetriever** — queries the D-Bus Secret Service API (provided by `gnome-keyring-daemon` or `kwalletd`). Iterates all collections and items, looking for a label matching the browser's storage name. Populates the V11 slot because Chromium emits v11 prefix only when keyring access succeeds.
+
+**PosixRetriever** — uses the hardcoded `"peanuts"` password that Chromium derives into a fixed 16-byte AES-128 key (kV10Key). Populates the V10 slot because Chromium emits v10 prefix for data encrypted with this key. Always succeeds deterministically.
+
+### 5.2 Why Two Slots, Not a Chain
+
+A profile can carry **both** v10 and v11 ciphertexts if the host has moved between keyring-equipped and headless sessions — e.g. a laptop that was once used in a headless shell then later in a full desktop session. The old `ChainRetriever{DBus, Fallback}` had first-success semantics: if D-Bus worked, peanuts was never called, leaving v10 ciphertexts undecryptable.
+
+The split mirrors the Windows V10/V20 fix (§4.4) and the root-cause logic of issue #578: distinct cipher prefixes map to distinct key sources, so the retriever layer must produce both keys independently rather than picking "one winning" key.
 
 ### 5.3 PBKDF2 Derivation
 
@@ -148,21 +159,64 @@ A single iteration makes PBKDF2 essentially a keyed HMAC — no real key-stretch
 
 ### 5.4 Storage Labels
 
-| Browser | D-Bus Label |
-|---------|-------------|
-| Chrome / Chrome Beta / Vivaldi | `"Chrome Safe Storage"` |
-| Chromium / Edge / Opera | `"Chromium Safe Storage"` |
-| Brave | `"Brave Safe Storage"` |
+Linux D-Bus labels follow a `"<name> Safe Storage"` convention, but many browsers alias onto a small shared set rather than defining their own. The three distinct labels are `"Chrome Safe Storage"`, `"Chromium Safe Storage"`, and `"Brave Safe Storage"` — everything else maps onto one of these.
+
+The authoritative mapping lives in the `Storage` field of each entry in `platformBrowsers()` (`browser/browser_linux.go`).
 
 ## 6. Platform Summary
 
-| Platform | Chain | PBKDF2 | Key Size |
-|----------|-------|:------:|----------|
-| macOS | Gcoredump → KeychainPassword* → SecurityCmd | 1003 iterations | AES-128 |
-| Windows | DPAPI only | No | AES-256 |
-| Linux | DBus → Fallback | 1 iteration | AES-128 |
+| Platform | Retrievers (slots populated) | PBKDF2 | Key Size |
+|----------|------------------------------|:------:|----------|
+| macOS | V10 = chain(Gcoredump → KeychainPassword* → SecurityCmd) | 1003 iterations | AES-128 |
+| Windows | V10 = DPAPIRetriever; V20 = ABERetriever (Chrome 127+) | No | AES-256 |
+| Linux | V10 = PosixRetriever ("peanuts" kV10Key); V11 = DBusRetriever (keyring kV11Key) | 1 iteration | AES-128 |
 
 \* Only included when `--keychain-pw` is provided.
+
+## 7. Safari Credential Extraction
+
+Safari is **not** a consumer of the `KeyRetriever` interface. It has its own credential-extraction path in `browser/safari/extract_password.go`, which uses [keychainbreaker](https://github.com/moond4rk/keychainbreaker) directly to list `InternetPassword` records from `login.keychain-db`.
+
+This is a deliberate architectural choice, not an oversight. The following sections explain why.
+
+### 7.1 Why Safari Does Not Share the Chromium Chain
+
+| Aspect | Chromium chain | Safari direct access |
+|---|---|---|
+| Output | A 16-byte AES-128 key | A list of `InternetPassword` records |
+| Use case | Decrypt Login Data DB | Records *are* the credentials |
+| Number of consumers | 10+ Chromium variants | 1 (Safari only) |
+| Failure mode | Hard fail (no key → cannot decrypt) | Soft fail (degrade to metadata-only) |
+| Caching benefit | High (multi-profile, multi-browser) | None (single browser, single call) |
+
+Forcing Safari through the `KeyRetriever` interface would require returning a different type than `[]byte`, contradicting the interface's documented purpose as the *master-key* abstraction. Forcing it through a parallel "InternetPassword chain" would be over-engineering for a single consumer that has no fallback strategies worth chaining.
+
+Note the "failure mode" row in particular: Chromium *must* have a master key or extraction fails entirely, so it needs a chain of escalating strategies. Safari can degrade gracefully — if the keychain cannot be unlocked, metadata-only export (URLs and usernames, no plaintext passwords) is still useful output, so a single "try keychainbreaker, warn on failure" is sufficient.
+
+### 7.2 The General Rule
+
+> **Each browser package owns its own credential-acquisition strategy. `crypto/keyretriever` exists only to share retrieval logic across the Chromium variant family. New browser implementations should follow Safari's and Firefox's example — own your credential code.**
+
+Evidence the rule is already in force:
+
+- **Firefox** (`browser/firefox/firefox.go`) does not import `keyretriever` or `keychainbreaker`. It derives keys from `key4.db` via internal NSS PBE. See RFC-005.
+- **Safari** (`browser/safari/extract_password.go`) uses `keychainbreaker` directly for `InternetPassword` records.
+- **Chromium variants** all go through `crypto/keyretriever` because they share exactly one chain and benefit from the shared `sync.Once` caching.
+
+Future contributors adding a new macOS browser that reads credentials from the Keychain should add their access logic to that browser's package, not extend `keyretriever`. Only extend `keyretriever` if the new browser is a Chromium variant that fits the existing master-key chain.
+
+### 7.3 Where the `--keychain-pw` Password Goes
+
+The macOS login password is resolved once at startup by `browser/browser_darwin.go::resolveKeychainPassword`, then delivered to both consumers from within a single platform-specific closure, `newPlatformInjector` (defined per platform in `browser/browser_{darwin,linux,windows}.go`). The closure captures both the retriever chain and the raw password, and applies whichever capability interface each Browser happens to satisfy:
+
+| Consumer | Capability interface | Defined in | Payload |
+|---|---|---|---|
+| Chromium browsers | `keyRetrieversSetter` | `browser/browser.go` | `keyretriever.Retrievers` struct (V10 / V11 / V20 slots; unused tiers nil) |
+| Safari | `keychainPasswordSetter` | `browser/browser_darwin.go` | raw `string` |
+
+The two setters are **intentionally not unified**. They carry different abstractions — one hands the browser a pre-assembled retrieval chain, the other hands the browser a credential token to unlock its own access path. Unifying them would create a leaky polymorphic interface with no real shared semantics. Note that `keychainPasswordSetter` is defined in the darwin-only file because Safari (its only implementer) is darwin-only.
+
+`resolveKeychainPassword` additionally performs an early `TryUnlock` against `keychainbreaker` before the chain is built, so a bad password surfaces as a startup warning rather than a mid-extraction failure. The small cost of opening the keychain twice (once for validation, once inside `KeychainPasswordRetriever`) buys meaningful UX.
 
 ## References
 
