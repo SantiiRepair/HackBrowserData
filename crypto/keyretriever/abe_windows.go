@@ -25,17 +25,15 @@ var errNoABEKey = errors.New("abe: Local State has no app_bound_encrypted_key")
 
 type ABERetriever struct{}
 
-func (r *ABERetriever) RetrieveKey(storage, localStatePath string) ([]byte, error) {
-	// Non-ABE Chromium forks (Opera/Vivaldi/Yandex/...) call this with an empty storage key; pre-v20
-	// Chrome profiles have no app_bound_encrypted_key in Local State. Both are "ABE not applicable" —
-	// return (nil, nil) so ChainRetriever falls through to DPAPI silently instead of emitting a Warnf
-	// for every non-ABE browser.
-	browserKey := strings.TrimSpace(storage)
+func (r *ABERetriever) RetrieveKey(hints Hints) ([]byte, error) {
+	// Non-ABE forks (Opera/Vivaldi/Yandex) supply no WindowsABEKey — treat as "not applicable".
+	// (Pre-v20 Chrome takes the errNoABEKey path below.)
+	browserKey := strings.TrimSpace(hints.WindowsABEKey)
 	if browserKey == "" {
 		return nil, nil
 	}
 
-	encKey, err := loadEncryptedKey(localStatePath)
+	encKey, err := loadEncryptedKey(hints.LocalStatePath)
 	if errors.Is(err, errNoABEKey) {
 		return nil, nil
 	}

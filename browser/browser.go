@@ -20,6 +20,7 @@ type Browser interface {
 	BrowserName() string
 	ProfileName() string
 	ProfileDir() string
+	UserDataDir() string
 	Extract(categories []types.Category) (*types.BrowserData, error)
 	CountEntries(categories []types.Category) (map[types.Category]int, error)
 }
@@ -111,11 +112,15 @@ func pickFromConfigs(configs []types.BrowserConfig, opts PickOptions) ([]Browser
 	return browsers, nil
 }
 
-// keyRetrieversSetter is an optional capability interface. Chromium variants implement it to
-// receive the per-tier master-key retrievers (V10 / V11 / V20) as a single Retrievers struct;
-// Firefox and Safari do not.
-type keyRetrieversSetter interface {
+// KeyManager is implemented by engines that accept externally-provided master-key retrievers (Chromium family only).
+type KeyManager interface {
 	SetKeyRetrievers(keyretriever.Retrievers)
+	ExportKeys() (keyretriever.MasterKeys, error)
+}
+
+// KeychainPasswordReceiver is implemented by engines that need the macOS login password (Safari only).
+type KeychainPasswordReceiver interface {
+	SetKeychainPassword(string)
 }
 
 // resolveGlobs expands glob patterns in browser configs' UserDataDir.

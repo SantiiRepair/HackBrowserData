@@ -10,53 +10,53 @@ import (
 func platformBrowsers() []types.BrowserConfig {
 	return []types.BrowserConfig{
 		{
-			Key:         "chrome",
-			Name:        chromeName,
-			Kind:        types.Chromium,
-			Storage:     "Chrome Safe Storage",
-			UserDataDir: homeDir + "/.config/google-chrome",
+			Key:           "chrome",
+			Name:          chromeName,
+			Kind:          types.Chromium,
+			KeychainLabel: "Chrome Safe Storage",
+			UserDataDir:   homeDir + "/.config/google-chrome",
 		},
 		{
-			Key:         "edge",
-			Name:        edgeName,
-			Kind:        types.Chromium,
-			Storage:     "Chromium Safe Storage",
-			UserDataDir: homeDir + "/.config/microsoft-edge",
+			Key:           "edge",
+			Name:          edgeName,
+			Kind:          types.Chromium,
+			KeychainLabel: "Chromium Safe Storage",
+			UserDataDir:   homeDir + "/.config/microsoft-edge",
 		},
 		{
-			Key:         "chromium",
-			Name:        chromiumName,
-			Kind:        types.Chromium,
-			Storage:     "Chromium Safe Storage",
-			UserDataDir: homeDir + "/.config/chromium",
+			Key:           "chromium",
+			Name:          chromiumName,
+			Kind:          types.Chromium,
+			KeychainLabel: "Chromium Safe Storage",
+			UserDataDir:   homeDir + "/.config/chromium",
 		},
 		{
-			Key:         "chrome-beta",
-			Name:        chromeBetaName,
-			Kind:        types.Chromium,
-			Storage:     "Chrome Safe Storage",
-			UserDataDir: homeDir + "/.config/google-chrome-beta",
+			Key:           "chrome-beta",
+			Name:          chromeBetaName,
+			Kind:          types.Chromium,
+			KeychainLabel: "Chrome Safe Storage",
+			UserDataDir:   homeDir + "/.config/google-chrome-beta",
 		},
 		{
-			Key:         "opera",
-			Name:        operaName,
-			Kind:        types.ChromiumOpera,
-			Storage:     "Chromium Safe Storage",
-			UserDataDir: homeDir + "/.config/opera",
+			Key:           "opera",
+			Name:          operaName,
+			Kind:          types.ChromiumOpera,
+			KeychainLabel: "Chromium Safe Storage",
+			UserDataDir:   homeDir + "/.config/opera",
 		},
 		{
-			Key:         "vivaldi",
-			Name:        vivaldiName,
-			Kind:        types.Chromium,
-			Storage:     "Chrome Safe Storage",
-			UserDataDir: homeDir + "/.config/vivaldi",
+			Key:           "vivaldi",
+			Name:          vivaldiName,
+			Kind:          types.Chromium,
+			KeychainLabel: "Chrome Safe Storage",
+			UserDataDir:   homeDir + "/.config/vivaldi",
 		},
 		{
-			Key:         "brave",
-			Name:        braveName,
-			Kind:        types.Chromium,
-			Storage:     "Brave Safe Storage",
-			UserDataDir: homeDir + "/.config/BraveSoftware/Brave-Browser",
+			Key:           "brave",
+			Name:          braveName,
+			Kind:          types.Chromium,
+			KeychainLabel: "Brave Safe Storage",
+			UserDataDir:   homeDir + "/.config/BraveSoftware/Brave-Browser",
 		},
 		{
 			Key:         "firefox",
@@ -75,8 +75,8 @@ func platformBrowsers() []types.BrowserConfig {
 func newPlatformInjector(_ PickOptions) func(Browser) {
 	retrievers := keyretriever.DefaultRetrievers()
 	return func(b Browser) {
-		if s, ok := b.(keyRetrieversSetter); ok {
-			s.SetKeyRetrievers(retrievers)
+		if km, ok := b.(KeyManager); ok {
+			km.SetKeyRetrievers(retrievers)
 		}
 	}
 }

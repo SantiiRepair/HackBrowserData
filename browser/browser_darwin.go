@@ -17,81 +17,81 @@ import (
 func platformBrowsers() []types.BrowserConfig {
 	return []types.BrowserConfig{
 		{
-			Key:         "chrome",
-			Name:        chromeName,
-			Kind:        types.Chromium,
-			Storage:     "Chrome",
-			UserDataDir: homeDir + "/Library/Application Support/Google/Chrome",
+			Key:           "chrome",
+			Name:          chromeName,
+			Kind:          types.Chromium,
+			KeychainLabel: "Chrome",
+			UserDataDir:   homeDir + "/Library/Application Support/Google/Chrome",
 		},
 		{
-			Key:         "edge",
-			Name:        edgeName,
-			Kind:        types.Chromium,
-			Storage:     "Microsoft Edge",
-			UserDataDir: homeDir + "/Library/Application Support/Microsoft Edge",
+			Key:           "edge",
+			Name:          edgeName,
+			Kind:          types.Chromium,
+			KeychainLabel: "Microsoft Edge",
+			UserDataDir:   homeDir + "/Library/Application Support/Microsoft Edge",
 		},
 		{
-			Key:         "chromium",
-			Name:        chromiumName,
-			Kind:        types.Chromium,
-			Storage:     "Chromium",
-			UserDataDir: homeDir + "/Library/Application Support/Chromium",
+			Key:           "chromium",
+			Name:          chromiumName,
+			Kind:          types.Chromium,
+			KeychainLabel: "Chromium",
+			UserDataDir:   homeDir + "/Library/Application Support/Chromium",
 		},
 		{
-			Key:         "chrome-beta",
-			Name:        chromeBetaName,
-			Kind:        types.Chromium,
-			Storage:     "Chrome",
-			UserDataDir: homeDir + "/Library/Application Support/Google/Chrome Beta",
+			Key:           "chrome-beta",
+			Name:          chromeBetaName,
+			Kind:          types.Chromium,
+			KeychainLabel: "Chrome",
+			UserDataDir:   homeDir + "/Library/Application Support/Google/Chrome Beta",
 		},
 		{
-			Key:         "opera",
-			Name:        operaName,
-			Kind:        types.ChromiumOpera,
-			Storage:     "Opera",
-			UserDataDir: homeDir + "/Library/Application Support/com.operasoftware.Opera",
+			Key:           "opera",
+			Name:          operaName,
+			Kind:          types.ChromiumOpera,
+			KeychainLabel: "Opera",
+			UserDataDir:   homeDir + "/Library/Application Support/com.operasoftware.Opera",
 		},
 		{
-			Key:         "opera-gx",
-			Name:        operaGXName,
-			Kind:        types.ChromiumOpera,
-			Storage:     "Opera",
-			UserDataDir: homeDir + "/Library/Application Support/com.operasoftware.OperaGX",
+			Key:           "opera-gx",
+			Name:          operaGXName,
+			Kind:          types.ChromiumOpera,
+			KeychainLabel: "Opera",
+			UserDataDir:   homeDir + "/Library/Application Support/com.operasoftware.OperaGX",
 		},
 		{
-			Key:         "vivaldi",
-			Name:        vivaldiName,
-			Kind:        types.Chromium,
-			Storage:     "Vivaldi",
-			UserDataDir: homeDir + "/Library/Application Support/Vivaldi",
+			Key:           "vivaldi",
+			Name:          vivaldiName,
+			Kind:          types.Chromium,
+			KeychainLabel: "Vivaldi",
+			UserDataDir:   homeDir + "/Library/Application Support/Vivaldi",
 		},
 		{
-			Key:         "coccoc",
-			Name:        coccocName,
-			Kind:        types.Chromium,
-			Storage:     "CocCoc",
-			UserDataDir: homeDir + "/Library/Application Support/Coccoc",
+			Key:           "coccoc",
+			Name:          coccocName,
+			Kind:          types.Chromium,
+			KeychainLabel: "CocCoc",
+			UserDataDir:   homeDir + "/Library/Application Support/Coccoc",
 		},
 		{
-			Key:         "brave",
-			Name:        braveName,
-			Kind:        types.Chromium,
-			Storage:     "Brave",
-			UserDataDir: homeDir + "/Library/Application Support/BraveSoftware/Brave-Browser",
+			Key:           "brave",
+			Name:          braveName,
+			Kind:          types.Chromium,
+			KeychainLabel: "Brave",
+			UserDataDir:   homeDir + "/Library/Application Support/BraveSoftware/Brave-Browser",
 		},
 		{
-			Key:         "yandex",
-			Name:        yandexName,
-			Kind:        types.ChromiumYandex,
-			Storage:     "Yandex",
-			UserDataDir: homeDir + "/Library/Application Support/Yandex/YandexBrowser",
+			Key:           "yandex",
+			Name:          yandexName,
+			Kind:          types.ChromiumYandex,
+			KeychainLabel: "Yandex",
+			UserDataDir:   homeDir + "/Library/Application Support/Yandex/YandexBrowser",
 		},
 		{
-			Key:         "arc",
-			Name:        arcName,
-			Kind:        types.Chromium,
-			Storage:     "Arc",
-			UserDataDir: homeDir + "/Library/Application Support/Arc/User Data",
+			Key:           "arc",
+			Name:          arcName,
+			Kind:          types.Chromium,
+			KeychainLabel: "Arc",
+			UserDataDir:   homeDir + "/Library/Application Support/Arc/User Data",
 		},
 		{
 			Key:         "firefox",
@@ -155,20 +155,8 @@ func resolveKeychainPassword(flagPassword string) string {
 	return password
 }
 
-// keychainPasswordSetter is an optional capability interface satisfied by
-// Safari, which reads InternetPassword records directly from the login keychain.
-type keychainPasswordSetter interface {
-	SetKeychainPassword(string)
-}
-
-// newPlatformInjector returns a closure that injects the Chromium master-key
-// retriever and the Safari Keychain password into each Browser.
-//
-// Resolution is lazy: the keychain password prompt and retriever construction
-// are deferred until the first Browser that actually needs them passes through
-// the closure. Browsers that satisfy neither setter interface (e.g. Firefox)
-// short-circuit without ever touching the keychain, so `-b firefox` on macOS
-// no longer triggers a password prompt.
+// newPlatformInjector lazily wires retrievers (and the macOS keychain password) into each Browser;
+// `-b firefox` never triggers a keychain prompt because lazy resolution skips browsers that need neither.
 func newPlatformInjector(opts PickOptions) func(Browser) {
 	var (
 		password   string
@@ -176,8 +164,8 @@ func newPlatformInjector(opts PickOptions) func(Browser) {
 		resolved   bool
 	)
 	return func(b Browser) {
-		rs, needsRetrievers := b.(keyRetrieversSetter)
-		kps, needsKeychainPassword := b.(keychainPasswordSetter)
+		km, needsRetrievers := b.(KeyManager)
+		kps, needsKeychainPassword := b.(KeychainPasswordReceiver)
 		if !needsRetrievers && !needsKeychainPassword {
 			return
 		}
@@ -187,7 +175,7 @@ func newPlatformInjector(opts PickOptions) func(Browser) {
 			resolved = true
 		}
 		if needsRetrievers {
-			rs.SetKeyRetrievers(retrievers)
+			km.SetKeyRetrievers(retrievers)
 		}
 		if needsKeychainPassword {
 			kps.SetKeychainPassword(password)

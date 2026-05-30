@@ -59,11 +59,60 @@ func (b *Browser) SetKeyRetrievers(r keyretriever.Retrievers) {
 
 func (b *Browser) BrowserName() string { return b.cfg.Name }
 func (b *Browser) ProfileDir() string  { return b.profileDir }
+func (b *Browser) UserDataDir() string { return b.cfg.UserDataDir }
 func (b *Browser) ProfileName() string {
 	if b.profileDir == "" {
 		return ""
 	}
 	return filepath.Base(b.profileDir)
+}
+
+// ExportKeys derives this profile's master keys without performing extraction.
+// Returns whatever tiers succeeded plus a joined error describing any failed
+// tiers; callers preserve partial results because a Chrome 127+ profile mixes
+// v10 + v20 ciphertexts and a v20-only failure must not erase a usable v10 key.
+// Used by cross-host workflows where keys are produced on one host and consumed
+// on another.
+func (b *Browser) ExportKeys() (keyretriever.MasterKeys, error) {
+	session, err := filemanager.NewSession()
+	if err != nil {
+		return keyretriever.MasterKeys{}, err
+	}
+	defer session.Cleanup()
+
+	return keyretriever.NewMasterKeys(b.retrievers, b.buildHints(session))
+}
+
+// buildHints discovers Local State (acquiring it into session.TempDir so Windows DPAPI/ABE retrievers can
+// read it from a path the process owns) and assembles per-tier retriever hints. Shared by Extract and
+// ExportKeys so the two stay in lockstep. Multi-profile layout: Local State lives in the parent of
+// profileDir. Flat layout (Opera): Local State sits alongside data files inside profileDir.
+func (b *Browser) buildHints(session *filemanager.Session) keyretriever.Hints {
+	label := b.BrowserName() + "/" + b.ProfileName()
+	var localStateDst string
+	for _, dir := range []string{filepath.Dir(b.profileDir), b.profileDir} {
+		candidate := filepath.Join(dir, "Local State")
+		if !fileutil.FileExists(candidate) {
+			continue
+		}
+		dst := filepath.Join(session.TempDir(), "Local State")
+		if err := session.Acquire(candidate, dst, false); err != nil {
+			log.Debugf("acquire Local State for %s: %v", label, err)
+			break
+		}
+		localStateDst = dst
+		break
+	}
+
+	abeKey := ""
+	if b.cfg.WindowsABE {
+		abeKey = b.cfg.Key
+	}
+	return keyretriever.Hints{
+		KeychainLabel:  b.cfg.KeychainLabel,
+		WindowsABEKey:  abeKey,
+		LocalStatePath: localStateDst,
+	}
 }
 
 // Extract copies browser files to a temp directory, retrieves the master key,
@@ -175,33 +224,13 @@ var warnedMasterKeyFailure sync.Map
 
 // getMasterKeys retrieves master keys for all configured cipher tiers.
 func (b *Browser) getMasterKeys(session *filemanager.Session) keyretriever.MasterKeys {
-	label := b.BrowserName() + "/" + b.ProfileName()
-
-	// Locate and copy Local State (needed on Windows, ignored on macOS/Linux). Multi-profile
-	// layout: Local State is in the parent of profileDir. Flat layout (Opera): Local State is
-	// alongside data files in profileDir.
-	var localStateDst string
-	for _, dir := range []string{filepath.Dir(b.profileDir), b.profileDir} {
-		candidate := filepath.Join(dir, "Local State")
-		if !fileutil.FileExists(candidate) {
-			continue
-		}
-		dst := filepath.Join(session.TempDir(), "Local State")
-		if err := session.Acquire(candidate, dst, false); err != nil {
-			log.Debugf("acquire Local State for %s: %v", label, err)
-			break
-		}
-		localStateDst = dst
-		break
-	}
-
-	keys, err := keyretriever.NewMasterKeys(b.retrievers, b.cfg.Storage, localStateDst)
+	keys, err := keyretriever.NewMasterKeys(b.retrievers, b.buildHints(session))
 	if err != nil {
 		installKey := b.BrowserName() + "|" + b.cfg.UserDataDir
 		if _, already := warnedMasterKeyFailure.LoadOrStore(installKey, struct{}{}); !already {
 			log.Warnf("%s: master key retrieval: %v", b.BrowserName(), err)
 		} else {
-			log.Debugf("%s: master key retrieval: %v", label, err)
+			log.Debugf("%s/%s: master key retrieval: %v", b.BrowserName(), b.ProfileName(), err)
 		}
 	}
 	return keys

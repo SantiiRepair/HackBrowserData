@@ -448,17 +448,15 @@ func TestLocalStatePath(t *testing.T) {
 
 // mockRetriever records the arguments passed to RetrieveKey.
 type mockRetriever struct {
-	storage    string
-	localState string
-	key        []byte
-	err        error
-	called     bool
+	hints  keyretriever.Hints
+	key    []byte
+	err    error
+	called bool
 }
 
-func (m *mockRetriever) RetrieveKey(storage, localStatePath string) ([]byte, error) {
+func (m *mockRetriever) RetrieveKey(hints keyretriever.Hints) ([]byte, error) {
 	m.called = true
-	m.storage = storage
-	m.localState = localStatePath
+	m.hints = hints
 	return m.key, m.err
 }
 
@@ -472,41 +470,41 @@ func TestGetMasterKeys(t *testing.T) {
 	mkFile(dirNoLocalState, "Default", "History")
 
 	tests := []struct {
-		name           string
-		dir            string
-		storage        string
-		retriever      keyretriever.KeyRetriever // nil → don't call SetKeyRetrievers
-		wantV10        []byte
-		wantStorage    string
-		wantLocalState bool // whether localStatePath passed to retriever is non-empty
+		name              string
+		dir               string
+		keychainLabel     string
+		retriever         keyretriever.KeyRetriever // nil → don't call SetKeyRetrievers
+		wantV10           []byte
+		wantKeychainLabel string
+		wantLocalState    bool // whether localStatePath passed to retriever is non-empty
 	}{
 		{
 			name: "nil retriever yields empty keys",
 			dir:  fixture.chrome,
 		},
 		{
-			name:           "with Local State passes path to retriever",
-			dir:            fixture.chrome,
-			storage:        "Chrome",
-			retriever:      &mockRetriever{key: []byte("fake-master-key")},
-			wantV10:        []byte("fake-master-key"),
-			wantStorage:    "Chrome",
-			wantLocalState: true,
+			name:              "with Local State passes path to retriever",
+			dir:               fixture.chrome,
+			keychainLabel:     "Chrome",
+			retriever:         &mockRetriever{key: []byte("fake-master-key")},
+			wantV10:           []byte("fake-master-key"),
+			wantKeychainLabel: "Chrome",
+			wantLocalState:    true,
 		},
 		{
-			name:        "without Local State passes empty path",
-			dir:         dirNoLocalState,
-			storage:     "Chromium",
-			retriever:   &mockRetriever{key: []byte("derived-key")},
-			wantV10:     []byte("derived-key"),
-			wantStorage: "Chromium",
+			name:              "without Local State passes empty path",
+			dir:               dirNoLocalState,
+			keychainLabel:     "Chromium",
+			retriever:         &mockRetriever{key: []byte("derived-key")},
+			wantV10:           []byte("derived-key"),
+			wantKeychainLabel: "Chromium",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			browsers, err := NewBrowsers(types.BrowserConfig{
-				Name: "Test", Kind: types.Chromium, UserDataDir: tt.dir, Storage: tt.storage,
+				Name: "Test", Kind: types.Chromium, UserDataDir: tt.dir, KeychainLabel: tt.keychainLabel,
 			})
 			require.NoError(t, err)
 			require.NotEmpty(t, browsers)
@@ -531,11 +529,11 @@ func TestGetMasterKeys(t *testing.T) {
 			mock, ok := tt.retriever.(*mockRetriever)
 			require.True(t, ok)
 			assert.True(t, mock.called)
-			assert.Equal(t, tt.wantStorage, mock.storage)
+			assert.Equal(t, tt.wantKeychainLabel, mock.hints.KeychainLabel)
 			if tt.wantLocalState {
-				assert.NotEmpty(t, mock.localState)
+				assert.NotEmpty(t, mock.hints.LocalStatePath)
 			} else {
-				assert.Empty(t, mock.localState)
+				assert.Empty(t, mock.hints.LocalStatePath)
 			}
 		})
 	}
@@ -553,7 +551,7 @@ func TestGetMasterKeys_AllTiersInvoked(t *testing.T) {
 	v20mock := &mockRetriever{key: []byte("fake-v20-key")}
 
 	browsers, err := NewBrowsers(types.BrowserConfig{
-		Name: "Test", Kind: types.Chromium, UserDataDir: fixture.chrome, Storage: "Chrome",
+		Name: "Test", Kind: types.Chromium, UserDataDir: fixture.chrome, KeychainLabel: "Chrome",
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, browsers)
@@ -573,8 +571,44 @@ func TestGetMasterKeys_AllTiersInvoked(t *testing.T) {
 	assert.True(t, v11mock.called, "V11 retriever must be called — no silent bypass")
 	assert.True(t, v20mock.called, "V20 retriever must be called — no silent bypass")
 	for _, m := range []*mockRetriever{v10mock, v11mock, v20mock} {
-		assert.Equal(t, "Chrome", m.storage)
-		assert.NotEmpty(t, m.localState, "Local State path must be passed to every retriever")
+		assert.Equal(t, "Chrome", m.hints.KeychainLabel)
+		assert.NotEmpty(t, m.hints.LocalStatePath, "Local State path must be passed to every retriever")
+	}
+}
+
+// TestGetMasterKeys_WindowsABEThreading pins cfg.WindowsABE → hints.WindowsABEKey threading. A
+// regression here silently disables Windows ABE decryption with no dev-box-test signal — only the
+// windows-tunnel sandbox 574-cookie regression would catch it — so it must be pinned at unit level.
+func TestGetMasterKeys_WindowsABEThreading(t *testing.T) {
+	tests := []struct {
+		name       string
+		key        string
+		windowsABE bool
+		wantABEKey string
+	}{
+		{"WindowsABE=true threads cfg.Key into hints.WindowsABEKey", "chrome", true, "chrome"},
+		{"WindowsABE=false leaves hints.WindowsABEKey empty", "opera", false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockRetriever{key: []byte("k")}
+			browsers, err := NewBrowsers(types.BrowserConfig{
+				Key: tt.key, Name: "Test", Kind: types.Chromium,
+				UserDataDir: fixture.chrome, WindowsABE: tt.windowsABE,
+			})
+			require.NoError(t, err)
+			require.NotEmpty(t, browsers)
+
+			b := browsers[0]
+			b.SetKeyRetrievers(keyretriever.Retrievers{V20: mock})
+
+			session, err := filemanager.NewSession()
+			require.NoError(t, err)
+			defer session.Cleanup()
+
+			b.getMasterKeys(session)
+			assert.Equal(t, tt.wantABEKey, mock.hints.WindowsABEKey)
+		})
 	}
 }
 
@@ -605,7 +639,7 @@ func TestExtract(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			browsers, err := NewBrowsers(types.BrowserConfig{
-				Name: "Test", Kind: types.Chromium, UserDataDir: dir, Storage: "Chrome",
+				Name: "Test", Kind: types.Chromium, UserDataDir: dir, KeychainLabel: "Chrome",
 			})
 			require.NoError(t, err)
 			require.Len(t, browsers, 1)
