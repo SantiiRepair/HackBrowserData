@@ -6,7 +6,7 @@ import (
 	"database/sql"
 	"sort"
 
-	"github.com/moond4rk/hackbrowserdata/crypto/keyretriever"
+	"github.com/moond4rk/hackbrowserdata/masterkey"
 	"github.com/moond4rk/hackbrowserdata/types"
 	"github.com/moond4rk/hackbrowserdata/utils/sqliteutil"
 )
@@ -14,11 +14,11 @@ import (
 const (
 	defaultCookieQuery = `SELECT name, encrypted_value, host_key, path,
 		creation_utc, expires_utc, is_secure, is_httponly,
-		has_expires, is_persistent FROM cookies`
+		has_expires, is_persistent, samesite FROM cookies`
 	countCookieQuery = `SELECT COUNT(*) FROM cookies`
 )
 
-func extractCookies(keys keyretriever.MasterKeys, path string) ([]types.CookieEntry, error) {
+func extractCookies(masterKeys masterkey.MasterKeys, path string) ([]types.CookieEntry, error) {
 	cookies, err := sqliteutil.QueryRows(path, false, defaultCookieQuery,
 		func(rows *sql.Rows) (types.CookieEntry, error) {
 			var (
@@ -27,15 +27,27 @@ func extractCookies(keys keyretriever.MasterKeys, path string) ([]types.CookieEn
 				hasExpire, isPersistent int
 				createdAt, expireAt     int64
 				encryptedValue          []byte
+				sameSite                int
 			)
 			if err := rows.Scan(&name, &encryptedValue, &host, &cookiePath,
 				&createdAt, &expireAt, &isSecure, &isHTTPOnly,
-				&hasExpire, &isPersistent); err != nil {
+				&hasExpire, &isPersistent, &sameSite); err != nil {
 				return types.CookieEntry{}, err
 			}
 
-			value, _ := decryptValue(keys, encryptedValue)
+			value, _ := decryptValue(masterKeys, encryptedValue)
 			value = stripCookieHash(value, host)
+			sameSiteStr := "unspecified"
+			switch sameSite {
+			case 0:
+				sameSiteStr = "none"
+			case 1:
+				sameSiteStr = "lax"
+			case 2:
+				sameSiteStr = "strict"
+			case -1:
+				// not specified by Set-Cookie
+			}
 			return types.CookieEntry{
 				Name:         name,
 				Host:         host,
@@ -47,6 +59,7 @@ func extractCookies(keys keyretriever.MasterKeys, path string) ([]types.CookieEn
 				IsPersistent: isPersistent != 0,
 				ExpireAt:     timeEpoch(expireAt),
 				CreatedAt:    timeEpoch(createdAt),
+				SameSite:     sameSiteStr,
 			}, nil
 		})
 	if err != nil {

@@ -1,4 +1,4 @@
-package keyretriever
+package masterkey
 
 import (
 	"encoding/json"
@@ -10,10 +10,10 @@ import (
 	"time"
 )
 
-const DumpVersion = "1"
+const DumpVersion = "2"
 
-// Dump is the cross-host portable container for Chromium master keys. Producing it on one host lets another host skip
-// platform-native retrieval (DPAPI, ABE injection, Keychain prompt, D-Bus query) when decrypting copied profile data.
+// Dump is the portable, cross-host container for Chromium master keys — produce it on one host to
+// decrypt copied profile data on another without DPAPI / ABE / Keychain / D-Bus.
 type Dump struct {
 	Version   string    `json:"version"`
 	CreatedAt time.Time `json:"created_at"`
@@ -30,14 +30,16 @@ type Host struct {
 }
 
 // Vault groups profiles sharing master keys (master keys are per-installation, not per-profile).
+// Browser is the lookup key (e.g. "chrome"); Kind is the engine ("chromium"|"chromium-yandex"|
+// "chromium-opera") so a consumer can rebuild the engine without the local browser table.
 type Vault struct {
 	Browser     string     `json:"browser"`
+	Kind        string     `json:"kind"`
 	UserDataDir string     `json:"user_data_dir"`
 	Profiles    []string   `json:"profiles"`
 	Keys        MasterKeys `json:"keys"`
 }
 
-// NewDump returns a Dump initialized with current host metadata and an empty Vaults slice
 func NewDump() Dump {
 	return Dump{
 		Version:   DumpVersion,
@@ -47,7 +49,6 @@ func NewDump() Dump {
 	}
 }
 
-// currentHost collects host identification; Hostname/User are best-effort (syscall failure leaves them empty + omitempty).
 func currentHost() Host {
 	h := Host{OS: runtime.GOOS, Arch: runtime.GOARCH}
 	if name, err := os.Hostname(); err == nil {
@@ -59,7 +60,6 @@ func currentHost() Host {
 	return h
 }
 
-// WriteJSON writes the Dump as indented JSON to w.
 func (d Dump) WriteJSON(w io.Writer) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -69,8 +69,8 @@ func (d Dump) WriteJSON(w io.Writer) error {
 	return nil
 }
 
-// ReadJSON parses a Dump from r and rejects schema versions this build cannot interpret —
-// silent misparse of a future v2 schema is worse than a clear error.
+// ReadJSON parses a Dump and rejects any version this build can't interpret — a silent misparse of an
+// unrecognized schema is worse than a clear error.
 func ReadJSON(r io.Reader) (Dump, error) {
 	var d Dump
 	dec := json.NewDecoder(r)

@@ -9,8 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/moond4rk/hackbrowserdata/crypto/keyretriever"
-	"github.com/moond4rk/hackbrowserdata/filemanager"
+	"github.com/moond4rk/hackbrowserdata/masterkey"
 	"github.com/moond4rk/hackbrowserdata/types"
 )
 
@@ -220,36 +219,81 @@ func TestNewBrowsers(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := types.BrowserConfig{Name: "Test", Kind: tt.kind, UserDataDir: tt.dir}
-			browsers, err := NewBrowsers(cfg)
+			b, err := NewBrowser(cfg)
 			require.NoError(t, err)
 
 			if len(tt.wantProfiles) == 0 {
-				assert.Empty(t, browsers)
+				assert.Nil(t, b)
 				return
 			}
-			require.Len(t, browsers, len(tt.wantProfiles))
+			require.NotNil(t, b)
+			require.Len(t, b.profiles, len(tt.wantProfiles))
 
-			nameMap := browsersByProfile(browsers)
+			nameMap := profilesByName(b)
 			assertProfiles(t, nameMap, tt.wantProfiles, tt.skipProfiles)
 			assertCategories(t, nameMap, tt.wantCats)
-			assertDirCategories(t, browsers, tt.wantDirs)
+			assertDirCategories(t, b.profiles, tt.wantDirs)
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// discoverProfiles: fallback boundaries (marker-less copies, flat-layout precedence)
+// ---------------------------------------------------------------------------
+
+func TestDiscoverProfiles(t *testing.T) {
+	t.Run("markerless multi-subdir resolves all source-bearing dirs", func(t *testing.T) {
+		dir := t.TempDir()
+		mkFile(dir, "Default", "History")
+		mkFile(dir, "Profile 1", "History")
+		assert.Len(t, discoverProfiles(dir, chromiumSources), 2)
+	})
+
+	t.Run("marker present keeps fallback dormant", func(t *testing.T) {
+		dir := t.TempDir()
+		mkFile(dir, "Default", "Preferences")
+		mkFile(dir, "Default", "History")
+		mkFile(dir, "NotAProfile", "History")
+		got := discoverProfiles(dir, chromiumSources)
+		require.Len(t, got, 1)
+		assert.Equal(t, filepath.Join(dir, "Default"), got[0])
+	})
+
+	t.Run("skipped dir ignored by markerless fallback", func(t *testing.T) {
+		dir := t.TempDir()
+		mkFile(dir, "System Profile", "History")
+		assert.Empty(t, discoverProfiles(dir, chromiumSources))
+	})
+
+	t.Run("sourceless subdir ignored", func(t *testing.T) {
+		dir := t.TempDir()
+		mkDir(dir, "Crashpad")
+		assert.Empty(t, discoverProfiles(dir, chromiumSources))
+	})
+
+	t.Run("flat-layout root wins over source-bearing subdir", func(t *testing.T) {
+		dir := t.TempDir()
+		mkFile(dir, "History")
+		mkFile(dir, "Subthing", "History")
+		got := discoverProfiles(dir, chromiumSources)
+		require.Len(t, got, 1)
+		assert.Equal(t, dir, got[0], "flat-layout root must win; subdir must not hijack discovery")
+	})
 }
 
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 
-func browsersByProfile(browsers []*Browser) map[string]*Browser {
-	m := make(map[string]*Browser, len(browsers))
-	for _, b := range browsers {
-		m[filepath.Base(b.profileDir)] = b
+func profilesByName(b *Browser) map[string]*profile {
+	m := make(map[string]*profile, len(b.profiles))
+	for _, p := range b.profiles {
+		m[filepath.Base(p.profileDir)] = p
 	}
 	return m
 }
 
-func assertProfiles(t *testing.T, nameMap map[string]*Browser, want, skip []string) {
+func assertProfiles(t *testing.T, nameMap map[string]*profile, want, skip []string) {
 	t.Helper()
 	for _, w := range want {
 		assert.Contains(t, nameMap, w, "should find profile %s", w)
@@ -259,17 +303,17 @@ func assertProfiles(t *testing.T, nameMap map[string]*Browser, want, skip []stri
 	}
 }
 
-func assertCategories(t *testing.T, nameMap map[string]*Browser, wantCats map[string][]string) {
+func assertCategories(t *testing.T, nameMap map[string]*profile, wantCats map[string][]string) {
 	t.Helper()
 	for profileName, wantFiles := range wantCats {
-		b, ok := nameMap[profileName]
+		p, ok := nameMap[profileName]
 		if !ok {
 			t.Errorf("profile %s not found", profileName)
 			continue
 		}
 		for _, wantFile := range wantFiles {
 			found := false
-			for _, rp := range b.sourcePaths {
+			for _, rp := range p.sourcePaths {
 				if filepath.Base(rp.absPath) == wantFile {
 					found = true
 					break
@@ -280,11 +324,11 @@ func assertCategories(t *testing.T, nameMap map[string]*Browser, wantCats map[st
 	}
 }
 
-func assertDirCategories(t *testing.T, browsers []*Browser, cats []types.Category) {
+func assertDirCategories(t *testing.T, profiles []*profile, cats []types.Category) {
 	t.Helper()
 	for _, cat := range cats {
-		for _, b := range browsers {
-			if rp, ok := b.sourcePaths[cat]; ok {
+		for _, p := range profiles {
+			if rp, ok := p.sourcePaths[cat]; ok {
 				assert.True(t, rp.isDir, "%s should be isDir=true", cat)
 			}
 		}
@@ -345,74 +389,6 @@ func TestExtractorsForKind(t *testing.T) {
 	assert.Contains(t, operaExt, types.Extension)
 }
 
-// TestExtractCategory_CustomExtractor verifies that extractCategory dispatches
-// through a registered extractor instead of the default switch logic.
-func TestExtractCategory_CustomExtractor(t *testing.T) {
-	// Create a Browser with a custom extractor that records it was called
-	called := false
-	testExtractor := extensionExtractor{
-		fn: func(path string) ([]types.ExtensionEntry, error) {
-			called = true
-			return []types.ExtensionEntry{{Name: "custom", ID: "test-id"}}, nil
-		},
-	}
-
-	b := &Browser{
-		extractors: map[types.Category]categoryExtractor{
-			types.Extension: testExtractor,
-		},
-	}
-
-	data := &types.BrowserData{}
-	b.extractCategory(data, types.Extension, keyretriever.MasterKeys{}, "unused-path")
-
-	assert.True(t, called, "custom extractor should be called")
-	require.Len(t, data.Extensions, 1)
-	assert.Equal(t, "custom", data.Extensions[0].Name)
-}
-
-// TestExtractCategory_DefaultFallback verifies that extractCategory uses
-// the default switch when no extractor is registered.
-func TestExtractCategory_DefaultFallback(t *testing.T) {
-	path := createTestDB(t, "History", urlsSchema,
-		insertURL("https://example.com", "Example", 3, 13350000000000000),
-	)
-
-	b := &Browser{
-		extractors: nil, // no custom extractors
-	}
-
-	data := &types.BrowserData{}
-	b.extractCategory(data, types.History, keyretriever.MasterKeys{}, path)
-
-	require.Len(t, data.Histories, 1)
-	assert.Equal(t, "Example", data.Histories[0].Title)
-}
-
-// ---------------------------------------------------------------------------
-// acquireFiles
-// ---------------------------------------------------------------------------
-
-func TestAcquireFiles(t *testing.T) {
-	profileDir := filepath.Join(fixture.chrome, "Default")
-	resolved := resolveSourcePaths(chromiumSources, profileDir)
-
-	b := &Browser{profileDir: profileDir, sources: chromiumSources, sourcePaths: resolved}
-
-	session, err := filemanager.NewSession()
-	require.NoError(t, err)
-	defer session.Cleanup()
-
-	cats := []types.Category{types.History, types.Cookie, types.Bookmark}
-	paths := b.acquireFiles(session, cats)
-
-	assert.Len(t, paths, len(cats))
-	for _, p := range paths {
-		_, err := os.Stat(p)
-		require.NoError(t, err, "acquired file should exist")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Local State path validation
 // ---------------------------------------------------------------------------
@@ -428,12 +404,12 @@ func TestLocalStatePath(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			browsers, err := NewBrowsers(types.BrowserConfig{Name: "Test", Kind: types.Chromium, UserDataDir: tt.dir})
+			b, err := NewBrowser(types.BrowserConfig{Name: "Test", Kind: types.Chromium, UserDataDir: tt.dir})
 			require.NoError(t, err)
-			require.NotEmpty(t, browsers)
+			require.NotNil(t, b)
 
-			for _, b := range browsers {
-				localState := filepath.Join(filepath.Dir(b.profileDir), "Local State")
+			for _, p := range b.profiles {
+				localState := filepath.Join(filepath.Dir(p.profileDir), "Local State")
 				if tt.want {
 					assert.FileExists(t, localState)
 				}
@@ -448,21 +424,21 @@ func TestLocalStatePath(t *testing.T) {
 
 // mockRetriever records the arguments passed to RetrieveKey.
 type mockRetriever struct {
-	hints  keyretriever.Hints
+	hints  masterkey.Hints
 	key    []byte
 	err    error
 	called bool
 }
 
-func (m *mockRetriever) RetrieveKey(hints keyretriever.Hints) ([]byte, error) {
+func (m *mockRetriever) RetrieveKey(hints masterkey.Hints) ([]byte, error) {
 	m.called = true
 	m.hints = hints
 	return m.key, m.err
 }
 
 func TestGetMasterKeys(t *testing.T) {
-	// getMasterKeys routes through keyretriever.NewMasterKeys on every platform — the V10 mock
-	// wired via SetKeyRetrievers(Retrievers{V10: mock}) is consulted cross-platform.
+	// getMasterKeys routes through masterkey.NewMasterKeys on every platform — the V10 mock
+	// wired via SetRetrievers(Retrievers{V10: mock}) is consulted cross-platform.
 
 	// Profile directory without Local State file.
 	dirNoLocalState := t.TempDir()
@@ -473,7 +449,7 @@ func TestGetMasterKeys(t *testing.T) {
 		name              string
 		dir               string
 		keychainLabel     string
-		retriever         keyretriever.KeyRetriever // nil → don't call SetKeyRetrievers
+		retriever         masterkey.Retriever // nil → don't call SetRetrievers
 		wantV10           []byte
 		wantKeychainLabel string
 		wantLocalState    bool // whether localStatePath passed to retriever is non-empty
@@ -503,25 +479,20 @@ func TestGetMasterKeys(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			browsers, err := NewBrowsers(types.BrowserConfig{
+			b, err := NewBrowser(types.BrowserConfig{
 				Name: "Test", Kind: types.Chromium, UserDataDir: tt.dir, KeychainLabel: tt.keychainLabel,
 			})
 			require.NoError(t, err)
-			require.NotEmpty(t, browsers)
+			require.NotNil(t, b)
 
-			b := browsers[0]
 			if tt.retriever != nil {
-				b.SetKeyRetrievers(keyretriever.Retrievers{V10: tt.retriever})
+				b.SetRetrievers(masterkey.Retrievers{V10: tt.retriever})
 			}
 
-			session, err := filemanager.NewSession()
-			require.NoError(t, err)
-			defer session.Cleanup()
-
-			keys := b.getMasterKeys(session)
-			assert.Equal(t, tt.wantV10, keys.V10)
-			assert.Nil(t, keys.V11, "V11 stays nil when no v11 retriever is wired")
-			assert.Nil(t, keys.V20, "V20 stays nil when no v20 retriever is wired")
+			mk := b.masterKeys()
+			assert.Equal(t, tt.wantV10, mk.V10)
+			assert.Nil(t, mk.V11, "V11 stays nil when no v11 retriever is wired")
+			assert.Nil(t, mk.V20, "V20 stays nil when no v20 retriever is wired")
 
 			if tt.retriever == nil {
 				return
@@ -543,30 +514,25 @@ func TestGetMasterKeys(t *testing.T) {
 // Before the refactor a Windows-only bypass meant only one tier's retriever was consulted, so a
 // profile mixing prefixes silently lost the un-retrieved tier. After the refactor every
 // configured tier must be called exactly once and its key must land in the matching MasterKeys
-// slot. This catches any future "bypass keyretriever for a faster path" regression and covers the
+// slot. This catches any future "bypass the masterkey package for a faster path" regression and covers the
 // analogous Linux v10/v11 case — no platform silently drops a tier any more.
 func TestGetMasterKeys_AllTiersInvoked(t *testing.T) {
 	v10mock := &mockRetriever{key: []byte("fake-v10-key")}
 	v11mock := &mockRetriever{key: []byte("fake-v11-key")}
 	v20mock := &mockRetriever{key: []byte("fake-v20-key")}
 
-	browsers, err := NewBrowsers(types.BrowserConfig{
+	b, err := NewBrowser(types.BrowserConfig{
 		Name: "Test", Kind: types.Chromium, UserDataDir: fixture.chrome, KeychainLabel: "Chrome",
 	})
 	require.NoError(t, err)
-	require.NotEmpty(t, browsers)
+	require.NotNil(t, b)
 
-	b := browsers[0]
-	b.SetKeyRetrievers(keyretriever.Retrievers{V10: v10mock, V11: v11mock, V20: v20mock})
+	b.SetRetrievers(masterkey.Retrievers{V10: v10mock, V11: v11mock, V20: v20mock})
 
-	session, err := filemanager.NewSession()
-	require.NoError(t, err)
-	defer session.Cleanup()
-
-	keys := b.getMasterKeys(session)
-	assert.Equal(t, []byte("fake-v10-key"), keys.V10, "V10 slot must be populated")
-	assert.Equal(t, []byte("fake-v11-key"), keys.V11, "V11 slot must be populated")
-	assert.Equal(t, []byte("fake-v20-key"), keys.V20, "V20 slot must be populated")
+	mk := b.masterKeys()
+	assert.Equal(t, []byte("fake-v10-key"), mk.V10, "V10 slot must be populated")
+	assert.Equal(t, []byte("fake-v11-key"), mk.V11, "V11 slot must be populated")
+	assert.Equal(t, []byte("fake-v20-key"), mk.V20, "V20 slot must be populated")
 	assert.True(t, v10mock.called, "V10 retriever must be called — no silent bypass")
 	assert.True(t, v11mock.called, "V11 retriever must be called — no silent bypass")
 	assert.True(t, v20mock.called, "V20 retriever must be called — no silent bypass")
@@ -592,21 +558,16 @@ func TestGetMasterKeys_WindowsABEThreading(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mock := &mockRetriever{key: []byte("k")}
-			browsers, err := NewBrowsers(types.BrowserConfig{
+			b, err := NewBrowser(types.BrowserConfig{
 				Key: tt.key, Name: "Test", Kind: types.Chromium,
 				UserDataDir: fixture.chrome, WindowsABE: tt.windowsABE,
 			})
 			require.NoError(t, err)
-			require.NotEmpty(t, browsers)
+			require.NotNil(t, b)
 
-			b := browsers[0]
-			b.SetKeyRetrievers(keyretriever.Retrievers{V20: mock})
+			b.SetRetrievers(masterkey.Retrievers{V20: mock})
 
-			session, err := filemanager.NewSession()
-			require.NoError(t, err)
-			defer session.Cleanup()
-
-			b.getMasterKeys(session)
+			b.masterKeys()
 			assert.Equal(t, tt.wantABEKey, mock.hints.WindowsABEKey)
 		})
 	}
@@ -623,8 +584,8 @@ func TestExtract(t *testing.T) {
 
 	tests := []struct {
 		name          string
-		retriever     keyretriever.KeyRetriever // nil → don't call SetRetriever
-		wantRetriever bool                      // whether retriever should be called
+		retriever     masterkey.Retriever // nil → don't call SetRetriever
+		wantRetriever bool                // whether retriever should be called
 	}{
 		{
 			name: "without retriever extracts unencrypted data",
@@ -638,22 +599,23 @@ func TestExtract(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			browsers, err := NewBrowsers(types.BrowserConfig{
+			b, err := NewBrowser(types.BrowserConfig{
 				Name: "Test", Kind: types.Chromium, UserDataDir: dir, KeychainLabel: "Chrome",
 			})
 			require.NoError(t, err)
-			require.Len(t, browsers, 1)
+			require.NotNil(t, b)
 
 			if tt.retriever != nil {
-				browsers[0].SetKeyRetrievers(keyretriever.Retrievers{V10: tt.retriever})
+				b.SetRetrievers(masterkey.Retrievers{V10: tt.retriever})
 			}
 
-			result, err := browsers[0].Extract([]types.Category{types.History})
+			results, err := b.Extract([]types.Category{types.History})
 			require.NoError(t, err)
-			require.NotNil(t, result)
-			require.Len(t, result.Histories, 3)
+			require.Len(t, results, 1)
+			require.NotNil(t, results[0].Data)
+			require.Len(t, results[0].Data.Histories, 3)
 			// setupHistoryDB: Example(200) > GitHub(100) > Go Dev(50)
-			assert.Equal(t, "Example", result.Histories[0].Title)
+			assert.Equal(t, "Example", results[0].Data.Histories[0].Title)
 
 			if tt.wantRetriever {
 				mock, ok := tt.retriever.(*mockRetriever)
@@ -673,21 +635,22 @@ func TestCountEntries(t *testing.T) {
 	mkFile(dir, "Default", "Preferences")
 	installFile(t, filepath.Join(dir, "Default"), setupHistoryDB(t), "History")
 
-	browsers, err := NewBrowsers(types.BrowserConfig{
+	b, err := NewBrowser(types.BrowserConfig{
 		Name: "Test", Kind: types.Chromium, UserDataDir: dir,
 	})
 	require.NoError(t, err)
-	require.Len(t, browsers, 1)
+	require.NotNil(t, b)
 
 	// No retriever set — CountEntries should still work (no decryption needed).
-	counts, err := browsers[0].CountEntries([]types.Category{types.History, types.Download})
+	results, err := b.CountEntries([]types.Category{types.History, types.Download})
 	require.NoError(t, err)
+	require.Len(t, results, 1)
 
-	assert.Equal(t, 3, counts[types.History])
+	assert.Equal(t, 3, results[0].Counts[types.History])
 	// Download uses a different table in the same file; since we only
 	// created the urls table (not downloads), the count query will fail
 	// gracefully and return 0.
-	assert.Equal(t, 0, counts[types.Download])
+	assert.Equal(t, 0, results[0].Counts[types.Download])
 }
 
 func TestCountEntries_NoRetrieverNeeded(t *testing.T) {
@@ -696,63 +659,27 @@ func TestCountEntries_NoRetrieverNeeded(t *testing.T) {
 	// Login Data normally needs master key to extract, but CountEntries skips decryption.
 	installFile(t, filepath.Join(dir, "Default"), setupLoginDB(t), "Login Data")
 
-	browsers, err := NewBrowsers(types.BrowserConfig{
+	b, err := NewBrowser(types.BrowserConfig{
 		Name: "Test", Kind: types.Chromium, UserDataDir: dir,
 	})
 	require.NoError(t, err)
-	require.Len(t, browsers, 1)
+	require.NotNil(t, b)
 
 	// No retriever set — CountEntries succeeds without master key.
-	counts, err := browsers[0].CountEntries([]types.Category{types.Password})
+	results, err := b.CountEntries([]types.Category{types.Password})
 	require.NoError(t, err)
-	assert.Equal(t, 2, counts[types.Password])
-}
-
-func TestCountCategory(t *testing.T) {
-	t.Run("History", func(t *testing.T) {
-		path := setupHistoryDB(t)
-		b := &Browser{cfg: types.BrowserConfig{Kind: types.Chromium}}
-		assert.Equal(t, 3, b.countCategory(types.History, path))
-	})
-
-	t.Run("Cookie", func(t *testing.T) {
-		path := setupCookieDB(t)
-		b := &Browser{cfg: types.BrowserConfig{Kind: types.Chromium}}
-		assert.Equal(t, 2, b.countCategory(types.Cookie, path))
-	})
-
-	t.Run("Bookmark", func(t *testing.T) {
-		path := setupBookmarkJSON(t)
-		b := &Browser{cfg: types.BrowserConfig{Kind: types.Chromium}}
-		assert.Equal(t, 3, b.countCategory(types.Bookmark, path))
-	})
-
-	t.Run("Extension_Opera", func(t *testing.T) {
-		path := createTestJSON(t, "Secure Preferences", `{
-			"extensions": {
-				"opsettings": {
-					"ext1": {"location": 1, "manifest": {"name": "Ext", "version": "1.0"}}
-				}
-			}
-		}`)
-		b := &Browser{cfg: types.BrowserConfig{Kind: types.ChromiumOpera}}
-		assert.Equal(t, 1, b.countCategory(types.Extension, path))
-	})
-
-	t.Run("FileNotFound", func(t *testing.T) {
-		b := &Browser{cfg: types.BrowserConfig{Kind: types.Chromium}}
-		assert.Equal(t, 0, b.countCategory(types.History, "/nonexistent/path"))
-	})
+	require.Len(t, results, 1)
+	assert.Equal(t, 2, results[0].Counts[types.Password])
 }
 
 // ---------------------------------------------------------------------------
-// SetKeyRetrievers: verify *Browser satisfies the interface used by
-// browser.pickFromConfigs for post-construction retriever injection.
+// SetRetrievers: verify *Browser satisfies the interface used by
+// browser.discoverFromConfigs for post-construction retriever injection.
 // ---------------------------------------------------------------------------
 
-func TestSetKeyRetrievers_SatisfiesInterface(t *testing.T) {
+func TestSetRetrievers_SatisfiesInterface(t *testing.T) {
 	var _ interface {
-		SetKeyRetrievers(keyretriever.Retrievers)
+		SetRetrievers(masterkey.Retrievers)
 	} = (*Browser)(nil)
 }
 

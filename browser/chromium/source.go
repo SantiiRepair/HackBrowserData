@@ -1,9 +1,7 @@
 package chromium
 
 import (
-	"path/filepath"
-
-	"github.com/moond4rk/hackbrowserdata/crypto/keyretriever"
+	"github.com/moond4rk/hackbrowserdata/masterkey"
 	"github.com/moond4rk/hackbrowserdata/types"
 )
 
@@ -14,14 +12,16 @@ type sourcePath struct {
 	isDir bool   // true for directory targets (LevelDB, Session Storage)
 }
 
-func file(rel string) sourcePath { return sourcePath{rel: filepath.FromSlash(rel), isDir: false} }
-func dir(rel string) sourcePath  { return sourcePath{rel: filepath.FromSlash(rel), isDir: true} }
+// rel stays slash-canonical (e.g. "Network/Cookies"); filepath.Join converts at resolve time, and
+// archive reuses it verbatim as a forward-slash zip entry name.
+func file(rel string) sourcePath { return sourcePath{rel: rel, isDir: false} }
+func dir(rel string) sourcePath  { return sourcePath{rel: rel, isDir: true} }
 
 // chromiumSources defines the standard Chromium file layout.
 // Each category maps to one or more candidate paths tried in priority order;
 // the first existing path wins.
 var chromiumSources = map[types.Category][]sourcePath{
-	types.Password:       {file("Login Data")},
+	types.Password:       {file("Login Data"), file(accountLoginData)},
 	types.Cookie:         {file("Network/Cookies"), file("Cookies")},
 	types.History:        {file("History")},
 	types.Download:       {file("History")},
@@ -51,17 +51,17 @@ func sourcesForKind(kind types.BrowserKind) map[types.Category][]sourcePath {
 // switch logic, enabling browser-specific parsing (e.g. Opera's opsettings
 // for extensions, Yandex's credit card table, QBCI-encrypted bookmarks).
 type categoryExtractor interface {
-	extract(keys keyretriever.MasterKeys, path string, data *types.BrowserData) error
+	extract(masterKeys masterkey.MasterKeys, path string, data *types.BrowserData) error
 }
 
 // passwordExtractor wraps a custom password extract function.
 type passwordExtractor struct {
-	fn func(keys keyretriever.MasterKeys, path string) ([]types.LoginEntry, error)
+	fn func(masterKeys masterkey.MasterKeys, path string) ([]types.LoginEntry, error)
 }
 
-func (e passwordExtractor) extract(keys keyretriever.MasterKeys, path string, data *types.BrowserData) error {
+func (e passwordExtractor) extract(masterKeys masterkey.MasterKeys, path string, data *types.BrowserData) error {
 	var err error
-	data.Passwords, err = e.fn(keys, path)
+	data.Passwords, err = e.fn(masterKeys, path)
 	return err
 }
 
@@ -70,7 +70,7 @@ type extensionExtractor struct {
 	fn func(path string) ([]types.ExtensionEntry, error)
 }
 
-func (e extensionExtractor) extract(_ keyretriever.MasterKeys, path string, data *types.BrowserData) error {
+func (e extensionExtractor) extract(_ masterkey.MasterKeys, path string, data *types.BrowserData) error {
 	var err error
 	data.Extensions, err = e.fn(path)
 	return err
@@ -79,12 +79,12 @@ func (e extensionExtractor) extract(_ keyretriever.MasterKeys, path string, data
 // creditCardExtractor wraps a custom credit-card extract function, used by Yandex whose Ya Credit Cards DB stores
 // rows as records(guid, public_data, private_data) with JSON blobs rather than Chromium's flat credit_cards table.
 type creditCardExtractor struct {
-	fn func(keys keyretriever.MasterKeys, path string) ([]types.CreditCardEntry, error)
+	fn func(masterKeys masterkey.MasterKeys, path string) ([]types.CreditCardEntry, error)
 }
 
-func (e creditCardExtractor) extract(keys keyretriever.MasterKeys, path string, data *types.BrowserData) error {
+func (e creditCardExtractor) extract(masterKeys masterkey.MasterKeys, path string, data *types.BrowserData) error {
 	var err error
-	data.CreditCards, err = e.fn(keys, path)
+	data.CreditCards, err = e.fn(masterKeys, path)
 	return err
 }
 

@@ -28,7 +28,7 @@ func TestListBrowsers(t *testing.T) {
 type pickTest struct {
 	name         string
 	configs      []types.BrowserConfig
-	opts         PickOptions
+	opts         DiscoverOptions
 	wantNames    []string
 	wantProfiles []string
 }
@@ -37,7 +37,7 @@ func runPickTests(t *testing.T, tests []pickTest) {
 	t.Helper()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			browsers, err := pickFromConfigs(tt.configs, tt.opts)
+			browsers, err := discoverFromConfigs(tt.configs, tt.opts)
 			require.NoError(t, err)
 			assertBrowsers(t, browsers, tt.wantNames, tt.wantProfiles)
 		})
@@ -90,28 +90,28 @@ func TestPickFromConfigs(t *testing.T) {
 			{
 				name:         "exact match",
 				configs:      nameFilterConfigs,
-				opts:         PickOptions{Name: "chrome"},
+				opts:         DiscoverOptions{Name: "chrome"},
 				wantNames:    []string{"Chrome"},
 				wantProfiles: []string{"Default"},
 			},
 			{
 				name:         "case insensitive",
 				configs:      nameFilterConfigs,
-				opts:         PickOptions{Name: "Chrome"},
+				opts:         DiscoverOptions{Name: "Chrome"},
 				wantNames:    []string{"Chrome"},
 				wantProfiles: []string{"Default"},
 			},
 			{
 				name:         "all returns both",
 				configs:      nameFilterConfigs,
-				opts:         PickOptions{Name: "all"},
+				opts:         DiscoverOptions{Name: "all"},
 				wantNames:    []string{"Chrome", "Edge"},
 				wantProfiles: []string{"Default", "Default"},
 			},
 			{
 				name:    "unknown returns empty",
 				configs: nameFilterConfigs,
-				opts:    PickOptions{Name: "safari"},
+				opts:    DiscoverOptions{Name: "safari"},
 			},
 		})
 	})
@@ -123,7 +123,7 @@ func TestPickFromConfigs(t *testing.T) {
 				configs: []types.BrowserConfig{
 					{Key: "chrome", Name: "Chrome", Kind: types.Chromium, UserDataDir: chromeDir},
 				},
-				opts:         PickOptions{Name: "all"},
+				opts:         DiscoverOptions{Name: "all"},
 				wantNames:    []string{"Chrome", "Chrome"},
 				wantProfiles: []string{"Default", "Profile 1"},
 			},
@@ -132,7 +132,7 @@ func TestPickFromConfigs(t *testing.T) {
 				configs: []types.BrowserConfig{
 					{Key: "firefox", Name: "Firefox", Kind: types.Firefox, UserDataDir: firefoxDir},
 				},
-				opts:         PickOptions{Name: "all"},
+				opts:         DiscoverOptions{Name: "all"},
 				wantNames:    []string{"Firefox"},
 				wantProfiles: []string{"abc123.default-release"},
 			},
@@ -141,7 +141,7 @@ func TestPickFromConfigs(t *testing.T) {
 				configs: []types.BrowserConfig{
 					{Key: "yandex", Name: "Yandex", Kind: types.ChromiumYandex, UserDataDir: yandexDir},
 				},
-				opts:         PickOptions{Name: "all"},
+				opts:         DiscoverOptions{Name: "all"},
 				wantNames:    []string{"Yandex"},
 				wantProfiles: []string{"Default"},
 			},
@@ -150,7 +150,7 @@ func TestPickFromConfigs(t *testing.T) {
 				configs: []types.BrowserConfig{
 					{Key: "chrome", Name: "Chrome", Kind: types.Chromium, UserDataDir: "/nonexistent"},
 				},
-				opts: PickOptions{Name: "all"},
+				opts: DiscoverOptions{Name: "all"},
 			},
 		})
 	})
@@ -162,7 +162,7 @@ func TestPickFromConfigs(t *testing.T) {
 				configs: []types.BrowserConfig{
 					{Key: "chrome", Name: "Chrome", Kind: types.Chromium, UserDataDir: "/wrong"},
 				},
-				opts:         PickOptions{Name: "chrome", ProfilePath: filepath.Join(chromeDir, "Default")},
+				opts:         DiscoverOptions{Name: "chrome", ProfilePath: filepath.Join(chromeDir, "Default")},
 				wantNames:    []string{"Chrome"},
 				wantProfiles: []string{"Default"},
 			},
@@ -171,7 +171,7 @@ func TestPickFromConfigs(t *testing.T) {
 				configs: []types.BrowserConfig{
 					{Key: "firefox", Name: "Firefox", Kind: types.Firefox, UserDataDir: "/wrong"},
 				},
-				opts:         PickOptions{Name: "firefox", ProfilePath: filepath.Join(firefoxDir, "abc123.default-release")},
+				opts:         DiscoverOptions{Name: "firefox", ProfilePath: filepath.Join(firefoxDir, "abc123.default-release")},
 				wantNames:    []string{"Firefox"},
 				wantProfiles: []string{"abc123.default-release"},
 			},
@@ -180,7 +180,7 @@ func TestPickFromConfigs(t *testing.T) {
 				configs: []types.BrowserConfig{
 					{Key: "chrome", Name: "Chrome", Kind: types.Chromium, UserDataDir: chromeDir},
 				},
-				opts:         PickOptions{Name: "all", ProfilePath: "/some/override"},
+				opts:         DiscoverOptions{Name: "all", ProfilePath: "/some/override"},
 				wantNames:    []string{"Chrome", "Chrome"},
 				wantProfiles: []string{"Default", "Profile 1"},
 			},
@@ -194,7 +194,7 @@ func TestPickFromConfigs(t *testing.T) {
 				configs: []types.BrowserConfig{
 					{Key: "solo", Name: "Solo", Kind: types.Chromium, UserDataDir: filepath.Join(globBase, "Solo.Browser_*", "UserData")},
 				},
-				opts:         PickOptions{Name: "all"},
+				opts:         DiscoverOptions{Name: "all"},
 				wantNames:    []string{"Solo"},
 				wantProfiles: []string{"Default"},
 			},
@@ -203,7 +203,7 @@ func TestPickFromConfigs(t *testing.T) {
 				configs: []types.BrowserConfig{
 					{Key: "arc", Name: "Arc", Kind: types.Chromium, UserDataDir: filepath.Join(globBase, "App.Browser_*", "UserData")},
 				},
-				opts:         PickOptions{Name: "all"},
+				opts:         DiscoverOptions{Name: "all"},
 				wantNames:    []string{"Arc", "Arc"},
 				wantProfiles: []string{"Default", "Default"},
 			},
@@ -212,7 +212,7 @@ func TestPickFromConfigs(t *testing.T) {
 				configs: []types.BrowserConfig{
 					{Key: "missing", Name: "Missing", Kind: types.Chromium, UserDataDir: filepath.Join(globBase, "NoSuch_*", "UserData")},
 				},
-				opts: PickOptions{Name: "all"},
+				opts: DiscoverOptions{Name: "all"},
 			},
 			{
 				name: "mixed with literal",
@@ -220,7 +220,7 @@ func TestPickFromConfigs(t *testing.T) {
 					{Key: "chrome", Name: "Chrome", Kind: types.Chromium, UserDataDir: singleDir},
 					{Key: "arc", Name: "Arc", Kind: types.Chromium, UserDataDir: filepath.Join(globBase, "Solo.Browser_*", "UserData")},
 				},
-				opts:         PickOptions{Name: "all"},
+				opts:         DiscoverOptions{Name: "all"},
 				wantNames:    []string{"Arc", "Chrome"},
 				wantProfiles: []string{"Default", "Default"},
 			},
@@ -230,7 +230,7 @@ func TestPickFromConfigs(t *testing.T) {
 					{Key: "chrome", Name: "Chrome", Kind: types.Chromium, UserDataDir: singleDir},
 					{Key: "arc", Name: "Arc", Kind: types.Chromium, UserDataDir: filepath.Join(globBase, "App.Browser_*", "UserData")},
 				},
-				opts:         PickOptions{Name: "arc"},
+				opts:         DiscoverOptions{Name: "arc"},
 				wantNames:    []string{"Arc", "Arc"},
 				wantProfiles: []string{"Default", "Default"},
 			},
@@ -341,7 +341,7 @@ func TestResolveGlobs(t *testing.T) {
 	}
 }
 
-func TestNewBrowsersDispatch(t *testing.T) {
+func TestNewBrowserDispatch(t *testing.T) {
 	chromiumDir := t.TempDir()
 	mkFile(t, chromiumDir, "Default", "Preferences")
 	mkFile(t, chromiumDir, "Default", "History")
@@ -357,7 +357,7 @@ func TestNewBrowsersDispatch(t *testing.T) {
 	tests := []struct {
 		name        string
 		cfg         types.BrowserConfig
-		wantLen     int
+		wantNil     bool
 		wantName    string
 		wantProfile string
 		wantErr     string
@@ -365,21 +365,18 @@ func TestNewBrowsersDispatch(t *testing.T) {
 		{
 			name:        "chromium dispatch",
 			cfg:         types.BrowserConfig{Key: "chrome", Name: "Chrome", Kind: types.Chromium, UserDataDir: chromiumDir},
-			wantLen:     1,
 			wantName:    "Chrome",
 			wantProfile: "Default",
 		},
 		{
 			name:        "firefox dispatch",
 			cfg:         types.BrowserConfig{Key: "firefox", Name: "Firefox", Kind: types.Firefox, UserDataDir: firefoxDir},
-			wantLen:     1,
 			wantName:    "Firefox",
 			wantProfile: "abc.default",
 		},
 		{
 			name:        "safari dispatch",
 			cfg:         types.BrowserConfig{Key: "safari", Name: "Safari", Kind: types.Safari, UserDataDir: safariDir},
-			wantLen:     1,
 			wantName:    "Safari",
 			wantProfile: "default",
 		},
@@ -389,38 +386,45 @@ func TestNewBrowsersDispatch(t *testing.T) {
 			wantErr: "unknown browser kind",
 		},
 		{
-			name: "empty dir returns empty",
-			cfg:  types.BrowserConfig{Key: "chrome", Name: "Chrome", Kind: types.Chromium, UserDataDir: emptyDir},
+			name:    "empty dir returns nil",
+			cfg:     types.BrowserConfig{Key: "chrome", Name: "Chrome", Kind: types.Chromium, UserDataDir: emptyDir},
+			wantNil: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			found, err := newBrowsers(tt.cfg)
+			b, err := newBrowser(tt.cfg)
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErr)
 				return
 			}
 			require.NoError(t, err)
-			require.Len(t, found, tt.wantLen)
-			if tt.wantLen > 0 {
-				assert.Equal(t, tt.wantName, found[0].BrowserName())
-				assert.Equal(t, tt.wantProfile, found[0].ProfileName())
+			if tt.wantNil {
+				assert.Nil(t, b)
+				return
 			}
+			require.NotNil(t, b)
+			assert.Equal(t, tt.wantName, b.BrowserName())
+			profiles := b.Profiles()
+			require.NotEmpty(t, profiles)
+			assert.Equal(t, tt.wantProfile, profiles[0].Name)
 		})
 	}
 }
 
-// assertBrowsers verifies browser names and profiles match expectations (order-independent).
+// assertBrowsers flattens installations into (browser, profile) pairs and
+// verifies they match expectations (order-independent).
 func assertBrowsers(t *testing.T, browsers []Browser, wantNames, wantProfiles []string) {
 	t.Helper()
-	assert.Len(t, browsers, len(wantNames))
 
 	var gotNames, gotProfiles []string
 	for _, b := range browsers {
-		gotNames = append(gotNames, b.BrowserName())
-		gotProfiles = append(gotProfiles, b.ProfileName())
+		for _, p := range b.Profiles() {
+			gotNames = append(gotNames, b.BrowserName())
+			gotProfiles = append(gotProfiles, p.Name)
+		}
 	}
 	sort.Strings(gotNames)
 	sort.Strings(gotProfiles)

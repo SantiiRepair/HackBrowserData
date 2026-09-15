@@ -6,7 +6,7 @@
 
 ## 1. Command Structure
 
-The CLI is built on [cobra](https://github.com/spf13/cobra) with three subcommands: `dump`, `list`, and `version`.
+The CLI is built on [cobra](https://github.com/spf13/cobra) with six subcommands: `dump`, `dumpkeys`, `archive`, `restore`, `list`, and `version`.
 
 ### 1.1 Root Command
 
@@ -22,13 +22,13 @@ The primary command. Extracts, decrypts, and writes browser data to files.
 |------|-------|---------|-------------|
 | `--browser` | `-b` | `"all"` | Target browser |
 | `--category` | `-c` | `"all"` | Data categories (comma-separated) |
-| `--format` | `-f` | `"csv"` | Output format: csv, json, cookie-editor |
+| `--format` | `-f` | `"json"` | Output format: csv, json, cookie-editor |
 | `--dir` | `-d` | `"results"` | Output directory |
 | `--profile-path` | `-p` | | Custom profile directory |
 | `--keychain-pw` | | | macOS keychain password |
 | `--zip` | | `false` | Compress output to zip |
 
-**Workflow**: PickBrowsers (filter by `-b`) → parseCategories (split `-c` on commas) → NewWriter (select formatter by `-f`) → Extract loop (each browser) → Write → optional CompressDir.
+**Workflow**: DiscoverBrowsersWithKeys (filter by `-b`) → parseCategories (split `-c` on commas) → NewWriter (select formatter by `-f`) → Extract loop (each browser) → Write → optional CompressDir.
 
 The nine recognized categories are: `password`, `cookie`, `bookmark`, `history`, `download`, `creditcard`, `extension`, `localstorage`, `sessionstorage`. The string `"all"` maps to all nine.
 
@@ -38,7 +38,7 @@ Lists all detected browsers and profiles via `text/tabwriter`.
 
 **Basic mode** (default) — three columns: Browser, Profile, Path.
 
-**Detail mode** (`--detail`) — adds a column for every category showing entry counts. This actually calls `Extract()` on each browser to count entries.
+**Detail mode** (`--detail`) — adds a column for every category showing entry counts. This calls `CountEntries()` on each browser (not `Extract()`) — no decryption is performed.
 
 ### 1.4 version Command
 
@@ -121,11 +121,11 @@ File permissions are restrictive: directories `0750`, files `0600` (data may con
 
 ```
 CLI: hack-browser-data dump -b chrome -c password,cookie -f csv -d results
-  → PickBrowsers(name="chrome")       → []Browser
+  → DiscoverBrowsersWithKeys(name="chrome")       → []Browser
   → parseCategories("password,cookie") → []Category
   → NewWriter("results", "csv")        → *Writer
   → for each browser:
-      Extract(categories) → *BrowserData
+      Extract(categories) → []ExtractResult
       Writer.Add(browser, profile, data)
   → Writer.Write()
       → aggregate by category → format rows → write files

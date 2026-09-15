@@ -18,15 +18,16 @@ jobs:
         uses: actions/create-github-app-token@v3
         id: app-token
         with:
-          app-id: ${{ secrets.HACKBROWSERDATA_BOT_APP_ID }}
-          private-key: ${{ secrets.HACKBROWSERDATA_BOT_PRIVATE_KEY }}
+          client-id: ${{ vars.MOOND4RK_CI_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MOOND4RK_CI_RELEASE_APP_PRIVATE_KEY }}
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Update contributors list
+        id: contributors
         uses: akhilmhdh/contributors-readme-action@v2.3.11
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -34,5 +35,14 @@ jobs:
           image_size: 100
           columns_per_row: 6
           readme_path: README.md
-          auto_detect_branch_protection: false
-          commit_message: 'chore: update contributors list [skip ci]'
+          auto_detect_branch_protection: true
+          commit_message: 'chore: update contributors list'
+          pr_title_on_protected: 'chore: update contributors list'
+
+      - name: Enable auto-merge
+        if: steps.contributors.outputs.pr_id != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR: ${{ steps.contributors.outputs.pr_id }}
+          REPO: ${{ github.repository }}
+        run: gh pr merge "$PR" --squash --auto -R "$REPO"

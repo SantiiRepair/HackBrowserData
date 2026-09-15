@@ -1,4 +1,4 @@
-package keyretriever
+package masterkey
 
 import (
 	"bytes"
@@ -37,5 +37,34 @@ func TestReadJSON_AcceptsCurrentVersion(t *testing.T) {
 	}
 	if parsed.Version != DumpVersion {
 		t.Errorf("Version = %q, want %q", parsed.Version, DumpVersion)
+	}
+}
+
+func TestDump_VaultKindRoundTrip(t *testing.T) {
+	d := NewDump()
+	d.Vaults = append(d.Vaults, Vault{
+		Browser:     "chrome",
+		Kind:        "chromium",
+		UserDataDir: "/p",
+		Profiles:    []string{"Default"},
+		Keys:        MasterKeys{V10: []byte{0x01}},
+	})
+
+	var buf bytes.Buffer
+	if err := d.WriteJSON(&buf); err != nil {
+		t.Fatalf("WriteJSON: %v", err)
+	}
+	parsed, err := ReadJSON(&buf)
+	if err != nil {
+		t.Fatalf("ReadJSON: %v", err)
+	}
+	if len(parsed.Vaults) != 1 {
+		t.Fatalf("Vaults len = %d, want 1", len(parsed.Vaults))
+	}
+	if parsed.Vaults[0].Kind != "chromium" {
+		t.Errorf("Vault.Kind round-trip: got %q, want %q", parsed.Vaults[0].Kind, "chromium")
+	}
+	if parsed.Vaults[0].Browser != "chrome" {
+		t.Errorf("Vault.Browser round-trip: got %q, want %q", parsed.Vaults[0].Browser, "chrome")
 	}
 }

@@ -8,7 +8,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/moond4rk/hackbrowserdata/crypto/keyretriever"
+	"github.com/moond4rk/hackbrowserdata/masterkey"
+	"github.com/moond4rk/hackbrowserdata/types"
 )
 
 func setupLoginDB(t *testing.T) string {
@@ -22,7 +23,7 @@ func setupLoginDB(t *testing.T) string {
 func TestExtractPasswords(t *testing.T) {
 	path := setupLoginDB(t)
 
-	got, err := extractPasswords(keyretriever.MasterKeys{}, path)
+	got, err := extractPasswords(masterkey.MasterKeys{}, path, types.PasswordStoreLocal)
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 
@@ -35,6 +36,23 @@ func TestExtractPasswords(t *testing.T) {
 	assert.False(t, got[0].CreatedAt.IsZero())
 	// Password is empty because masterKey is nil (decrypt returns empty)
 	assert.Empty(t, got[0].Password)
+	assert.Equal(t, types.PasswordStoreLocal, got[0].Store)
+}
+
+// A credential whose blob cannot be decrypted must still be reported, otherwise a missing
+// master key would silently shrink the export instead of yielding empty passwords.
+func TestExtractPasswords_UndecryptableBlobStillListed(t *testing.T) {
+	path := createTestDB(t, "Login Data", loginsSchema,
+		insertLogin("https://enc.com", "https://enc.com/login", "carol", "763130deadbeef", 13350000000000000),
+	)
+
+	got, err := extractPasswords(masterkey.MasterKeys{}, path, types.PasswordStoreAccount)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+
+	assert.Equal(t, "carol", got[0].Username)
+	assert.Empty(t, got[0].Password)
+	assert.Equal(t, types.PasswordStoreAccount, got[0].Store)
 }
 
 func TestCountPasswords(t *testing.T) {
@@ -70,7 +88,7 @@ func TestExtractYandexPasswords(t *testing.T) {
 		},
 	)
 
-	got, err := extractYandexPasswords(keyretriever.MasterKeys{V10: masterKey}, path)
+	got, err := extractYandexPasswords(masterkey.MasterKeys{V10: masterKey}, path)
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 
@@ -93,7 +111,7 @@ func TestExtractYandexPasswords_MasterPasswordSkipped(t *testing.T) {
 		},
 	)
 
-	got, err := extractYandexPasswords(keyretriever.MasterKeys{V10: masterKey}, path)
+	got, err := extractYandexPasswords(masterkey.MasterKeys{V10: masterKey}, path)
 	require.NoError(t, err)
 	assert.Empty(t, got, "master-password profiles should be skipped in v1")
 }
@@ -112,7 +130,7 @@ func TestExtractYandexPasswords_WrongMasterKey(t *testing.T) {
 
 	// A wrong master key fails at the intermediate step, surfacing as an error
 	// from the extractor.
-	_, err := extractYandexPasswords(keyretriever.MasterKeys{V10: wrongKey}, path)
+	_, err := extractYandexPasswords(masterkey.MasterKeys{V10: wrongKey}, path)
 	require.Error(t, err)
 }
 

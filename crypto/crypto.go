@@ -1,9 +1,11 @@
 package crypto
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/des"
+	"crypto/sha1"
 	"fmt"
 )
 
@@ -50,20 +52,40 @@ func DES3Decrypt(key, iv, ciphertext []byte) ([]byte, error) {
 // same regardless of host OS (only Windows currently produces v20).
 const gcmNonceSize = 12
 
-// DecryptChromiumV20 decrypts a Chromium v20 (App-Bound Encryption) ciphertext.
-// Format: "v20" prefix (3B) + nonce (12B) + AES-GCM(payload + 16B tag).
-//
-// Cross-platform: v20 is only produced by Chrome on Windows today, but the
-// decryption math is platform-neutral. Keeping it here rather than in
-// crypto_windows.go ensures the routing in browser/chromium/decrypt.go stays
-// testable on Linux/macOS CI.
-func DecryptChromiumV20(key, ciphertext []byte) ([]byte, error) {
+// chromiumCBCIV is the fixed IV Chromium uses for AES-CBC v10/v11 (macOS/Linux).
+var chromiumCBCIV = bytes.Repeat([]byte{0x20}, aes.BlockSize)
+
+// kEmptyKey is Chromium's decrypt-only fallback for data corrupted by a KWallet
+// race in Chrome ~89 (crbug.com/40055416). Matches kEmptyKey in os_crypt_linux.cc.
+var kEmptyKey = PBKDF2Key([]byte(""), []byte("saltysalt"), 1, 16, sha1.New)
+
+// DecryptChromiumGCM decrypts a prefixed AES-GCM blob: version(3B)+nonce(12B)+ct+tag.
+// Used by Windows v10 (AES-256) and v20; the layout is identical and platform-neutral.
+func DecryptChromiumGCM(key, ciphertext []byte) ([]byte, error) {
 	if len(ciphertext) < versionPrefixLen+gcmNonceSize {
 		return nil, errShortCiphertext
 	}
 	nonce := ciphertext[versionPrefixLen : versionPrefixLen+gcmNonceSize]
 	payload := ciphertext[versionPrefixLen+gcmNonceSize:]
 	return AESGCMDecrypt(key, nonce, payload)
+}
+
+// DecryptChromiumCBC decrypts a prefixed AES-CBC blob (version(3B)+ct) with Chromium's
+// fixed IV, retrying with kEmptyKey to recover crbug.com/40055416 KWallet-corrupted data.
+// Used by macOS/Linux v10 and Linux v11 (both AES-128).
+func DecryptChromiumCBC(key, ciphertext []byte) ([]byte, error) {
+	if len(ciphertext) < versionPrefixLen+aes.BlockSize {
+		return nil, errShortCiphertext
+	}
+	payload := ciphertext[versionPrefixLen:]
+	plaintext, err := AESCBCDecrypt(key, chromiumCBCIV, payload)
+	if err == nil {
+		return plaintext, nil
+	}
+	if alt, altErr := AESCBCDecrypt(kEmptyKey, chromiumCBCIV, payload); altErr == nil {
+		return alt, nil
+	}
+	return nil, err
 }
 
 // AESGCMEncrypt encrypts data using AES-GCM mode.
@@ -115,7 +137,6 @@ func AESGCMDecryptBlob(key, blob, aad []byte) ([]byte, error) {
 	return aead.Open(nil, blob[:gcmNonceSize], blob[gcmNonceSize:], aad)
 }
 
-// cbcEncrypt adds PKCS5 padding and encrypts plaintext in CBC mode.
 func cbcEncrypt(block cipher.Block, iv, plaintext []byte) ([]byte, error) {
 	if len(iv) != block.BlockSize() {
 		return nil, errInvalidIVLength
@@ -127,7 +148,6 @@ func cbcEncrypt(block cipher.Block, iv, plaintext []byte) ([]byte, error) {
 	return dst, nil
 }
 
-// cbcDecrypt decrypts ciphertext in CBC mode and removes PKCS5 padding.
 func cbcDecrypt(block cipher.Block, iv, ciphertext []byte) ([]byte, error) {
 	bs := block.BlockSize()
 	if len(iv) != bs {
@@ -150,8 +170,7 @@ func cbcDecrypt(block cipher.Block, iv, ciphertext []byte) ([]byte, error) {
 	return dst, nil
 }
 
-// paddingZero pads src with zero bytes to the given length.
-// Returns src unchanged if already long enough; otherwise returns a new slice.
+// paddingZero returns src unchanged if already long enough; otherwise a zero-padded new slice.
 func paddingZero(src []byte, length int) []byte {
 	if len(src) >= length {
 		return src
@@ -173,7 +192,6 @@ func pkcs5Padding(src []byte, blockSize int) []byte {
 	return dst
 }
 
-// pkcs5UnPadding removes PKCS5/PKCS7 padding from src.
 func pkcs5UnPadding(src []byte, blockSize int) ([]byte, error) {
 	length := len(src)
 	if length == 0 {

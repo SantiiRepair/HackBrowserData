@@ -53,8 +53,8 @@ func TestStructCSVHeader(t *testing.T) {
 		entry  any
 		expect []string
 	}{
-		{"LoginEntry", types.LoginEntry{}, []string{"url", "username", "password", "created_at"}},
-		{"CookieEntry", types.CookieEntry{}, []string{"host", "path", "name", "value", "is_secure", "is_http_only", "has_expire", "is_persistent", "expire_at", "created_at"}},
+		{"LoginEntry", types.LoginEntry{}, []string{"url", "username", "password", "created_at", "store"}},
+		{"CookieEntry", types.CookieEntry{}, []string{"host", "path", "name", "value", "is_secure", "is_http_only", "has_expire", "is_persistent", "expire_at", "created_at", "same_site"}},
 		{"BookmarkEntry", types.BookmarkEntry{}, []string{"id", "name", "type", "url", "folder", "created_at"}},
 		{"HistoryEntry", types.HistoryEntry{}, []string{"url", "title", "visit_count", "last_visit"}},
 		{"DownloadEntry", types.DownloadEntry{}, []string{"url", "target_path", "mime_type", "total_bytes", "start_time", "end_time"}},
@@ -77,8 +77,8 @@ func TestStructCSVRow(t *testing.T) {
 	}{
 		{
 			"LoginEntry",
-			types.LoginEntry{URL: "https://example.com", Username: "alice", Password: "secret", CreatedAt: refTime},
-			[]string{"https://example.com", "alice", "secret", "2026-01-15T10:30:00Z"},
+			types.LoginEntry{URL: "https://example.com", Username: "alice", Password: "secret", CreatedAt: refTime, Store: types.PasswordStoreLocal},
+			[]string{"https://example.com", "alice", "secret", "2026-01-15T10:30:00Z", "local"},
 		},
 		{
 			"CookieEntry",
@@ -87,7 +87,7 @@ func TestStructCSVRow(t *testing.T) {
 				IsSecure: true, IsHTTPOnly: true, HasExpire: true, IsPersistent: false,
 				ExpireAt: refTime, CreatedAt: refTime,
 			},
-			[]string{".example.com", "/", "session", "abc", "true", "true", "true", "false", "2026-01-15T10:30:00Z", "2026-01-15T10:30:00Z"},
+			[]string{".example.com", "/", "session", "abc", "true", "true", "true", "false", "2026-01-15T10:30:00Z", "2026-01-15T10:30:00Z", ""},
 		},
 		{
 			"HistoryEntry_int",
@@ -107,7 +107,7 @@ func TestStructCSVRow(t *testing.T) {
 		{
 			"zero_time",
 			types.LoginEntry{URL: "https://a.com"},
-			[]string{"https://a.com", "", "", ""},
+			[]string{"https://a.com", "", "", "", ""},
 		},
 	}
 	for _, tt := range tests {
@@ -141,7 +141,7 @@ func TestRowMarshalJSON(t *testing.T) {
 		assert.Equal(t, "https://example.com", m["url"])
 		assert.Equal(t, "alice", m["username"])
 		assert.Equal(t, "secret", m["password"])
-		assert.Len(t, m, 6) // browser + profile + 4 entry fields
+		assert.Len(t, m, 7) // browser + profile + 5 entry fields
 
 		// Verify field order: browser, profile come before entry fields.
 		raw := string(data)

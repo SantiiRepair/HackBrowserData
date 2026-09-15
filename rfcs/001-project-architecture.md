@@ -11,21 +11,22 @@ HackBrowserData is a CLI security research tool that extracts and decrypts brows
 Key constraints:
 
 - **Go 1.20** — the module must build with Go 1.20 to maintain Windows 7 support. Features from Go 1.21+ (`log/slog`, `slices`, `maps`, `cmp`) must not be used.
-- **Supported engines**: Chromium (including Yandex and Opera variants) and Firefox.
+- **Supported engines**: Chromium (including Yandex and Opera variants), Firefox, and Safari.
 - **Supported platforms**: Windows (DPAPI), macOS (Keychain), Linux (D-Bus Secret Service).
-- **No root-level library API** — the CLI calls `browser.PickBrowsers()` directly; there is no importable `pkg/` surface.
+- **No root-level library API** — the CLI calls `browser.DiscoverBrowsersWithKeys()` directly; there is no importable `pkg/` surface.
 
 ## 2. Directory Structure
 
 ```
 HackBrowserData/
-├── cmd/hack-browser-data/    # CLI entrypoint: cobra root, dump, list, version
-├── browser/                  # Browser interface, PickBrowsers(), platform browser lists
+├── cmd/hack-browser-data/    # CLI entrypoint: cobra root, dump, dumpkeys, archive, restore, list, version
+├── browser/                  # Browser interface, DiscoverBrowsersWithKeys(), platform browser lists
 │   ├── chromium/             # Chromium engine: extraction, decryption, profile discovery
-│   └── firefox/              # Firefox engine: extraction, NSS key derivation
+│   ├── firefox/              # Firefox engine: extraction, NSS key derivation
+│   └── safari/               # Safari engine: Keychain, Bookmark, History, Downloads (macOS only)
 ├── types/                    # Data model: Category enum, Entry structs, BrowserData
 ├── crypto/                   # Encryption primitives, cipher version detection
-│   └── keyretriever/         # Platform-specific master key retrieval (Keychain/DPAPI/D-Bus)
+├── masterkey/                # Platform-specific master key retrieval (Keychain/DPAPI/D-Bus)
 ├── filemanager/              # Temp file session, locked file handling (Windows)
 ├── output/                   # Output Writer: CSV, JSON, CookieEditor formatters
 ├── log/                      # Logging with level filtering
@@ -59,7 +60,7 @@ Each category has a corresponding Entry struct with `json` and `csv` struct tags
 
 ### 3.3 BrowserData Container
 
-`BrowserData` is the result container returned by `Extract()`. It holds typed slices — one per category. The container is populated field-by-field during extraction. The output layer uses `makeExtractor[T]()` generics to pull the correct slice for serialization.
+`BrowserData` is the per-profile data container holding typed slices — one per category, populated field-by-field during extraction. `Extract()` returns `[]ExtractResult`, where each element pairs a `Profile` identity with a `*BrowserData`. The output layer uses `makeExtractor[T]()` generics to pull the correct slice for serialization.
 
 ## 4. Browser Interface & Registration
 
@@ -82,32 +83,27 @@ See `types/category.go` for the authoritative enum definition.
 There are two entry points, one for extraction and one for discovery:
 
 ```
-PickBrowsers(opts)                    // used by `dump` — ready to Extract
-  → pickFromConfigs(configs, opts)     // shared discovery core
+DiscoverBrowsersWithKeys(opts)                    // used by `dump` — ready to Extract
+  → discoverFromConfigs(configs, opts)     // shared discovery core
       → platformBrowsers()             // build-tagged list for this OS
       → filter by name / profile path
-      → newBrowsers(cfg)                // dispatch to chromium/firefox/safari.NewBrowsers
+      → newBrowser(cfg)                // dispatch to chromium/firefox/safari.NewBrowser
           → discoverProfiles()          // scan profile subdirectories
           → resolveSourcePaths()        // stat candidates, first match wins
-  → newPlatformInjector(opts)          // build-tagged: returns a func(Browser)
+  → newCredentialInjector(opts)          // build-tagged: returns a browserInjector
       → for each browser:               // closure captures retriever + keychain pw lazily
-          inject(b)                     // type-assert retrieverSetter / keychainPasswordSetter
+          inject(b)                     // type-assert KeyManager / KeychainPasswordReceiver
 
 DiscoverBrowsers(opts)                 // used by `list` / `list --detail`
-  → pickFromConfigs(configs, opts)     // same shared discovery core, NO injection
+  → discoverFromConfigs(configs, opts)     // same shared discovery core, NO injection
 ```
 
-`PickBrowsers` does discovery + decryption setup in one call; the returned
-browsers are ready for `b.Extract`. `DiscoverBrowsers` skips injection
-entirely, so list-style commands never trigger the macOS Keychain password
-prompt — they have no use for the credential. Both entry points share the
-same `pickFromConfigs` core, so filtering/profile-path/glob semantics stay
-consistent.
+`DiscoverBrowsersWithKeys` does discovery + decryption setup in one call; the returned browsers are ready for `b.Extract`. `DiscoverBrowsers` skips injection entirely, so list-style commands never trigger the macOS Keychain password prompt — they have no use for the credential. Both entry points share the same `discoverFromConfigs` core, so filtering/profile-path/glob semantics stay consistent.
 
 Key design decisions:
 
-- **One KeyRetriever chain per process** — built lazily inside `newPlatformInjector` and reused across every Chromium browser and every profile to prevent repeated keychain prompts on macOS.
-- **Discovery is decoupled from injection** — `pickFromConfigs` is injection-free; `DiscoverBrowsers` stops after it, `PickBrowsers` continues into injection.
+- **One Retriever chain per process** — built lazily inside `newCredentialInjector` and reused across every Chromium browser and every profile to prevent repeated keychain prompts on macOS.
+- **Discovery is decoupled from injection** — `discoverFromConfigs` is injection-free; `DiscoverBrowsers` stops after it, `DiscoverBrowsersWithKeys` continues into injection.
 - **Profile discovery differs by engine**: Chromium looks for `Preferences` files in subdirectories; Firefox accepts any subdirectory containing known source files.
 - **Flat layout fallback** — Opera-style browsers that store data directly in UserDataDir (no profile subdirectories) are handled by falling back to the base directory.
 
@@ -123,13 +119,13 @@ Adding a new browser is a config-only change in `platformBrowsers()`; this secti
 
 ## 5. Extract() Orchestration
 
-Both Chromium and Firefox engines follow the same extraction pattern:
+Both Chromium and Firefox engines follow the same per-profile extraction pattern (Firefox runs it inside each `profile.extract()` call; for Firefox the master key comes from `key4.db` rather than a platform API):
 
 ```
-Extract(categories)
+Extract(categories)   // per-profile: one invocation per profile
   1. NewSession()               → create isolated temp directory
   2. acquireFiles(session)      → copy source files to temp dir (with dedup and WAL/SHM)
-  3. getMasterKey(session)       → platform-specific key retrieval
+  3. getMasterKey(session)       → platform-specific key retrieval (Firefox: key4.db)
   4. for each category:
        extractCategory(data, cat, masterKey, path)
   5. defer session.Cleanup()    → remove temp directory
@@ -151,7 +147,7 @@ The extraction loop maximizes data recovery. Each category is extracted independ
 
 ### 5.2 Custom Extractors
 
-The `categoryExtractor` interface allows browser-specific extraction logic. Yandex and Opera use custom extractors for passwords and extensions respectively, while all other categories fall through to the default Chromium implementation.
+The `categoryExtractor` interface allows browser-specific extraction logic. Yandex uses custom extractors for passwords and credit cards; Opera uses a custom extractor for extensions. All other categories fall through to the default Chromium implementation.
 
 ## 6. Dependency Constraints
 
@@ -165,7 +161,7 @@ The module is pinned to `go 1.20` in `go.mod`. This is enforced by a CI lint che
 | `github.com/spf13/cobra` | v1.10.2 | CLI framework |
 | `github.com/moond4rk/keychainbreaker` | v0.2.5 | macOS keychain decryption |
 | `github.com/godbus/dbus/v5` | v5.2.2 | Linux D-Bus Secret Service |
-| `golang.org/x/sys` | v0.27.0 | Windows syscalls (DPAPI, DuplicateHandle) |
+| `golang.org/x/sys` | v0.30.0 | Windows syscalls (DPAPI, DuplicateHandle) |
 
 ## Related RFCs
 
